@@ -22,16 +22,18 @@
 #define AUCTION_HOUSE_BOT_H
 
 #include "Common.h"
-#include "ObjectGuid.h"
 
 #include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct AuctionEntry;
 class Player;
 class WorldSession;
 
-#include "ItemTemplate.h"
+#include "ItemPrototype.h"
 #include "SharedDefines.h"
 
 struct ListProportionNode
@@ -55,8 +57,8 @@ public:
         AHID = ahid;
         switch(ahid)
         {
-        case 2:
-            AHFID = 55;
+        case 1:
+            AHFID = 11;
             break;
         case 6:
             AHFID = 29;
@@ -113,7 +115,7 @@ public:
         AccountID(accountID),
         CharacterGUID(characterGUID) { }
     uint32 AccountID;
-    ObjectGuid::LowType CharacterGUID;
+    uint32 CharacterGUID;
 };
 
 class AuctionHouseBot
@@ -184,7 +186,6 @@ private:
     uint32 RandomStackRatioQuest;
     uint32 RandomStackRatioKey;
     uint32 RandomStackRatioMisc;
-    uint32 RandomStackRatioGlyph;
     uint32 RandomStackIncrementConsumable;
     uint32 RandomStackIncrementContainer;
     uint32 RandomStackIncrementWeapon;
@@ -199,7 +200,6 @@ private:
     uint32 RandomStackIncrementQuest;
     uint32 RandomStackIncrementKey;
     uint32 RandomStackIncrementMisc;
-    uint32 RandomStackIncrementGlyph;
     uint32 MaximumStackSizeConsumable;
     uint32 MaximumStackSizeContainer;
     uint32 MaximumStackSizeWeapon;
@@ -214,7 +214,6 @@ private:
     uint32 MaximumStackSizeQuest;
     uint32 MaximumStackSizeKey;
     uint32 MaximumStackSizeMisc;
-    uint32 MaximumStackSizeGlyph;
     std::vector<ListProportionNode> ItemListProportionNodesSeed;
     std::vector<ListProportionNode> ItemListProportionNodesLookup;
     std::unordered_map<uint32, uint64> ItemListProportionMultipliedItemIDs;
@@ -233,7 +232,6 @@ private:
     float PriceMultiplierCategoryQuest;
     float PriceMultiplierCategoryKey;
     float PriceMultiplierCategoryMisc;
-    float PriceMultiplierCategoryGlyph;
     float PriceMultiplierItemLevelCategoryConsumable;
     float PriceMultiplierItemLevelCategoryContainer;
     float PriceMultiplierItemLevelCategoryWeapon;
@@ -248,7 +246,6 @@ private:
     float PriceMultiplierItemLevelCategoryQuest;
     float PriceMultiplierItemLevelCategoryKey;
     float PriceMultiplierItemLevelCategoryMisc;
-    float PriceMultiplierItemLevelCategoryGlyph;
     float PriceMultiplierQualityPoor;
     float PriceMultiplierQualityNormal;
     float PriceMultiplierQualityUncommon;
@@ -256,7 +253,6 @@ private:
     float PriceMultiplierQualityEpic;
     float PriceMultiplierQualityLegendary;
     float PriceMultiplierQualityArtifact;
-    float PriceMultiplierQualityHeirloom;
     float PriceMultiplierCategoryQuality[MAX_ITEM_CLASS][MAX_ITEM_QUALITY];
     float PriceMultiplierCategoryMountQualityPoor;
     float PriceMultiplierCategoryMountQualityNormal;
@@ -265,7 +261,6 @@ private:
     float PriceMultiplierCategoryMountQualityEpic;
     float PriceMultiplierCategoryMountQualityLegendary;
     float PriceMultiplierCategoryMountQualityArtifact;
-    float PriceMultiplierCategoryMountQualityHeirloom;
     float PriceMultiplierCategoryPetQualityPoor;
     float PriceMultiplierCategoryPetQualityNormal;
     float PriceMultiplierCategoryPetQualityUncommon;
@@ -273,7 +268,6 @@ private:
     float PriceMultiplierCategoryPetQualityEpic;
     float PriceMultiplierCategoryPetQualityLegendary;
     float PriceMultiplierCategoryPetQualityArtifact;
-    float PriceMultiplierCategoryPetQualityHeirloom;
     bool AdvancedPricingConsumablePotionEnabled;
     bool AdvancedPricingConsumableElixirEnabled;
     bool AdvancedPricingConsumableFlaskEnabled;
@@ -303,7 +297,6 @@ private:
     uint32 PriceMinimumCenterBaseQuest;
     uint32 PriceMinimumCenterBaseKey;
     uint32 PriceMinimumCenterBaseMisc;
-    uint32 PriceMinimumCenterBaseGlyph;
     std::unordered_map<uint32, uint64> PriceMinimumCenterBaseOverridesByItemID;
     bool ListedItemIDRestrictedEnabled;
     uint32 ListedItemIDMin;
@@ -311,7 +304,7 @@ private:
     std::set<uint32> ListedItemIDExceptionItems;
     bool PreventOverpayingForVendorItems;
     std::unordered_map<uint32, double> CachedItemDropRates;
-    std::vector<std::vector<std::vector<std::vector<uint32>>>> ItemTiersByClassAndQuality;  // [Classes][Qualities][Tiers] .. [17][7][configurable]
+    std::vector<std::vector<std::vector<std::vector<uint32>>>> ItemTiersByClassAndQuality;  // [Classes][Qualities][Tiers]
     std::map<double, int, std::greater<double>> DropRatesToTierMap;
     std::set<uint32> AdvancedListingRuleUseDropRatesExceptionItems;
     bool AdvancedListingRuleUseDropRatesEnabled;
@@ -333,6 +326,11 @@ private:
     int ActiveListMultipleItemID;
     int RemainingListMultipleCount;
 
+    // Mail cleanup state
+    bool MailCleanupEnabled;
+    uint32 MailCleanupIntervalMinutes;
+    time_t LastMailCleanupTime;
+
     AuctionHouseBot();
 
 public:
@@ -348,6 +346,7 @@ public:
     bool IsModuleEnabled();
     void InitializeConfiguration();
     void EmptyAuctionHouses();
+    void CleanupBotMail();
     uint32 GetRandomStackValue(std::string configKeyString, uint32 defaultValue);
     uint32 GetRandomStackIncrementValue(std::string configKeyString, uint32 defaultValue);
     void SetCyclesBetweenBuyOrSell();
@@ -358,22 +357,22 @@ public:
     void AddToNumberListSet(std::set<uint32>& workingItemIDSet, uint32 itemID, const char* parentOperationName);
     const char* GetQualityName(ItemQualities quality);
     const char* GetCategoryName(ItemClass category);
-    uint32 GetStackSizeForItem(ItemTemplate const* itemProto) const;
-    void CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice);
+    uint32 GetStackSizeForItem(ItemPrototype const* itemProto) const;
+    void CalculateItemValue(ItemPrototype const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice);
     void PopulateItemDropChances();
     void PopulateItemDropChancesForCategoryAndQuality(ItemClass category, std::string qualities);
     void InitializeAdvancedListingRuleUseDropRatesTiers();
     void PopulateQuestRewardItemIDs();
     bool IsItemQuestReward(uint32 itemID);
     bool IsItemCrafted(uint32 itemID);
-    bool IsItemCategoryQualityInDBDropRatesConfig(ItemTemplate const* proto);
-    bool IsItemEligibleForDBDropRates(ItemTemplate const* proto);
-    bool HandleAdvancedListingRuleUseDropRates(ItemTemplate const*& proto);
+    bool IsItemCategoryQualityInDBDropRatesConfig(ItemPrototype const* proto);
+    bool IsItemEligibleForDBDropRates(ItemPrototype const* proto);
+    bool HandleAdvancedListingRuleUseDropRates(ItemPrototype const*& proto);
     int GetItemDropChanceTier(double dropRate);
-    float GetAdvancedPricingMultiplier(ItemTemplate const* itemProto);
-    ItemTemplate const* GetProducedItemFromRecipe(ItemTemplate const* recipeItemTemplate);
+    float GetAdvancedPricingMultiplier(ItemPrototype const* itemProto);
+    ItemPrototype const* GetProducedItemFromRecipe(ItemPrototype const* recipeItemTemplate);
     std::unordered_set<uint32> GetItemIDsProducedByRecipes();
-    bool IsItemADisabledRecipeProducedClassSubclass(ItemTemplate const* itemTemplate);
+    bool IsItemADisabledRecipeProducedClassSubclass(ItemPrototype const* itemTemplate);
     void PopulateItemCandidatesAndProportions();
     uint32 GetRandomItemIDForListing();
     void AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig* config);

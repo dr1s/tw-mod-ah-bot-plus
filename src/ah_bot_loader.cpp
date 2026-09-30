@@ -8,12 +8,7 @@
 void AddAHBotScripts();
 
 // Add all
-void Addmod_ah_bot_plusScripts()
-{
-    AddAHBotScripts();
-}
-
-void Addmod_ah_botScripts()
+void Addtw_mod_ah_bot_plusScripts()
 {
     AddAHBotScripts();
 }

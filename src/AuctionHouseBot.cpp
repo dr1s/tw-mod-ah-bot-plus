@@ -21,20 +21,59 @@
 #include "ObjectMgr.h"
 #include "AuctionHouseMgr.h"
 #include "AuctionHouseBot.h"
-#include "AuctionHouseSearcher.h"
-#include "Config.h"
+#include "Config/Config.h"
 #include "Player.h"
 #include "WorldSession.h"
-#include "DatabaseEnv.h"
-#include "ItemTemplate.h"
+#include "Database/DatabaseEnv.h"
+#include "ItemPrototype.h"
 #include "SharedDefines.h"
 #include "SpellMgr.h"
+#include "SpellEntry.h"
+#include "ObjectAccessor.h"
+#include "ObjectGuid.h"
+#include "Mail.h"
+#include "World.h"
 #include <cmath>
 
+#include <algorithm>
+#include <functional>
 #include <set>
+#include <sstream>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 using namespace std;
+
+static char const* MODULE_CONFIG_SECTION = "mod-ah-bot-plus";
+
+static bool GetConfigBool(char const* name, bool def)
+{
+    std::string val = sConfig.GetStringDefaultInSection(name, MODULE_CONFIG_SECTION, def ? "true" : "false");
+    return val == "true" || val == "TRUE" || val == "yes" || val == "YES" || val == "1";
+}
+
+static int32 GetConfigInt(char const* name, int32 def)
+{
+    std::string val = sConfig.GetStringDefaultInSection(name, MODULE_CONFIG_SECTION, std::to_string(def).c_str());
+    return atoi(val.c_str());
+}
+
+static uint32 GetConfigUInt(char const* name, uint32 def)
+{
+    return static_cast<uint32>(GetConfigInt(name, static_cast<int32>(def)));
+}
+
+static float GetConfigFloat(char const* name, float def)
+{
+    std::string val = sConfig.GetStringDefaultInSection(name, MODULE_CONFIG_SECTION, std::to_string(def).c_str());
+    return static_cast<float>(atof(val.c_str()));
+}
+
+static std::string GetConfigString(char const* name, char const* def)
+{
+    return sConfig.GetStringDefaultInSection(name, MODULE_CONFIG_SECTION, def);
+}
 
 AuctionHouseBot::AuctionHouseBot() :
     debug_Out(false),
@@ -72,10 +111,10 @@ AuctionHouseBot::AuctionHouseBot() :
     ListedItemLevelRestrictedEnabled(false),
     ListedItemLevelRestrictedUseCraftedItemForCalculation(true),
     ListedItemLevelMin(0),
-    ListedItemLevelMax(999),    
+    ListedItemLevelMax(999),
     ListedItemUseOrEquipRestrictedEnabled(false),
     ListedItemUseOrEquipRestrictMinLevel(0),
-    ListedItemUseOrEquipRestrictMaxLevel(999),    
+    ListedItemUseOrEquipRestrictMaxLevel(999),
     RandomStackRatioConsumable(1),
     RandomStackRatioContainer(1),
     RandomStackRatioWeapon(1),
@@ -90,7 +129,6 @@ AuctionHouseBot::AuctionHouseBot() :
     RandomStackRatioQuest(1),
     RandomStackRatioKey(1),
     RandomStackRatioMisc(1),
-    RandomStackRatioGlyph(1),
     RandomStackIncrementConsumable(1),
     RandomStackIncrementContainer(1),
     RandomStackIncrementWeapon(1),
@@ -105,7 +143,6 @@ AuctionHouseBot::AuctionHouseBot() :
     RandomStackIncrementQuest(1),
     RandomStackIncrementKey(1),
     RandomStackIncrementMisc(1),
-    RandomStackIncrementGlyph(1),
     MaximumStackSizeConsumable(0),
     MaximumStackSizeContainer(0),
     MaximumStackSizeWeapon(0),
@@ -120,7 +157,6 @@ AuctionHouseBot::AuctionHouseBot() :
     MaximumStackSizeQuest(0),
     MaximumStackSizeKey(0),
     MaximumStackSizeMisc(0),
-    MaximumStackSizeGlyph(0),
     PriceMultiplierCategoryConsumable(1),
     PriceMultiplierCategoryContainer(1),
     PriceMultiplierCategoryWeapon(1),
@@ -135,7 +171,6 @@ AuctionHouseBot::AuctionHouseBot() :
     PriceMultiplierCategoryQuest(1),
     PriceMultiplierCategoryKey(1),
     PriceMultiplierCategoryMisc(1),
-    PriceMultiplierCategoryGlyph(1),
     PriceMultiplierItemLevelCategoryConsumable(0),
     PriceMultiplierItemLevelCategoryContainer(0),
     PriceMultiplierItemLevelCategoryWeapon(0),
@@ -150,7 +185,6 @@ AuctionHouseBot::AuctionHouseBot() :
     PriceMultiplierItemLevelCategoryQuest(0),
     PriceMultiplierItemLevelCategoryKey(0),
     PriceMultiplierItemLevelCategoryMisc(0),
-    PriceMultiplierItemLevelCategoryGlyph(0),
     PriceMultiplierQualityPoor(1),
     PriceMultiplierQualityNormal(1),
     PriceMultiplierQualityUncommon(1),
@@ -158,7 +192,6 @@ AuctionHouseBot::AuctionHouseBot() :
     PriceMultiplierQualityEpic(1),
     PriceMultiplierQualityLegendary(1),
     PriceMultiplierQualityArtifact(1),
-    PriceMultiplierQualityHeirloom(1),
     UseItemSellPriceIfHigherThanPriceMinimumCenterBase(true),
     PriceMinimumCenterBaseConsumable(1),
     PriceMinimumCenterBaseContainer(1),
@@ -174,7 +207,6 @@ AuctionHouseBot::AuctionHouseBot() :
     PriceMinimumCenterBaseQuest(1),
     PriceMinimumCenterBaseKey(1),
     PriceMinimumCenterBaseMisc(1),
-    PriceMinimumCenterBaseGlyph(1),
     ListedItemIDRestrictedEnabled(false),
     ListedItemIDMin(0),
     ListedItemIDMax(200000),
@@ -186,9 +218,12 @@ AuctionHouseBot::AuctionHouseBot() :
     LastBuyCycleCount(0),
     LastSellCycleCount(0),
     ActiveListMultipleItemID(0),
-    RemainingListMultipleCount(0)
+    RemainingListMultipleCount(0),
+    MailCleanupEnabled(true),
+    MailCleanupIntervalMinutes(5),
+    LastMailCleanupTime(0)
 {
-    AllianceConfig = FactionSpecificAuctionHouseConfig(2);
+    AllianceConfig = FactionSpecificAuctionHouseConfig(1);
     HordeConfig = FactionSpecificAuctionHouseConfig(6);
     NeutralConfig = FactionSpecificAuctionHouseConfig(7);
 }
@@ -197,7 +232,7 @@ AuctionHouseBot::~AuctionHouseBot()
 {
 }
 
-uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
+uint32 AuctionHouseBot::GetStackSizeForItem(ItemPrototype const* itemProto) const
 {
     // Determine the stack ratio based on class type
     if (itemProto == NULL)
@@ -219,8 +254,7 @@ uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
         case ITEM_CLASS_QUIVER:         stackRatio = RandomStackRatioQuiver; break;
         case ITEM_CLASS_QUEST:          stackRatio = RandomStackRatioQuest; break;
         case ITEM_CLASS_KEY:            stackRatio = RandomStackRatioKey; break;
-        case ITEM_CLASS_MISC:           stackRatio = RandomStackRatioMisc; break;
-        case ITEM_CLASS_GLYPH:          stackRatio = RandomStackRatioGlyph; break;
+        case ITEM_CLASS_JUNK:           stackRatio = RandomStackRatioMisc; break;
         default:                        stackRatio = 0; break;
     }
 
@@ -240,8 +274,7 @@ uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
         case ITEM_CLASS_QUIVER:         stackIncrement = RandomStackIncrementQuiver; break;
         case ITEM_CLASS_QUEST:          stackIncrement = RandomStackIncrementQuest; break;
         case ITEM_CLASS_KEY:            stackIncrement = RandomStackIncrementKey; break;
-        case ITEM_CLASS_MISC:           stackIncrement = RandomStackIncrementMisc; break;
-        case ITEM_CLASS_GLYPH:          stackIncrement = RandomStackIncrementGlyph; break;
+        case ITEM_CLASS_JUNK:           stackIncrement = RandomStackIncrementMisc; break;
         default:                        stackIncrement = 1; break;
     }
     stackIncrement = std::max(stackIncrement, (uint32)1);
@@ -262,8 +295,7 @@ uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
         case ITEM_CLASS_QUIVER:         configStackSizeMax = MaximumStackSizeQuiver; break;
         case ITEM_CLASS_QUEST:          configStackSizeMax = MaximumStackSizeQuest; break;
         case ITEM_CLASS_KEY:            configStackSizeMax = MaximumStackSizeKey; break;
-        case ITEM_CLASS_MISC:           configStackSizeMax = MaximumStackSizeMisc; break;
-        case ITEM_CLASS_GLYPH:          configStackSizeMax = MaximumStackSizeGlyph; break;
+        case ITEM_CLASS_JUNK:           configStackSizeMax = MaximumStackSizeMisc; break;
         default:                        configStackSizeMax = 0; break;
     }
 
@@ -284,7 +316,7 @@ uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
         return 1;
 }
 
-void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice)
+void AuctionHouseBot::CalculateItemValue(ItemPrototype const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice)
 {
     if (CompleteItemValueOverrideEnabled == true)
     {
@@ -332,8 +364,7 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
     case ITEM_CLASS_QUIVER:         classPriceMultiplier = PriceMultiplierCategoryQuiver; break;
     case ITEM_CLASS_QUEST:          classPriceMultiplier = PriceMultiplierCategoryQuest; break;
     case ITEM_CLASS_KEY:            classPriceMultiplier = PriceMultiplierCategoryKey; break;
-    case ITEM_CLASS_MISC:           classPriceMultiplier = PriceMultiplierCategoryMisc; break;
-    case ITEM_CLASS_GLYPH:          classPriceMultiplier = PriceMultiplierCategoryGlyph; break;
+    case ITEM_CLASS_JUNK:           classPriceMultiplier = PriceMultiplierCategoryMisc; break;
     default:                        break;
     }
 
@@ -347,7 +378,6 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
     case ITEM_QUALITY_EPIC:         qualityPriceMultplier = PriceMultiplierQualityEpic; break;
     case ITEM_QUALITY_LEGENDARY:    qualityPriceMultplier = PriceMultiplierQualityLegendary; break;
     case ITEM_QUALITY_ARTIFACT:     qualityPriceMultplier = PriceMultiplierQualityArtifact; break;
-    case ITEM_QUALITY_HEIRLOOM:     qualityPriceMultplier = PriceMultiplierQualityHeirloom; break;
     default: break;
     }
 
@@ -380,8 +410,7 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
         case ITEM_CLASS_QUIVER:         PriceMinimumCenterBase = PriceMinimumCenterBaseQuiver; break;
         case ITEM_CLASS_QUEST:          PriceMinimumCenterBase = PriceMinimumCenterBaseQuest; break;
         case ITEM_CLASS_KEY:            PriceMinimumCenterBase = PriceMinimumCenterBaseKey; break;
-        case ITEM_CLASS_MISC:           PriceMinimumCenterBase = PriceMinimumCenterBaseMisc; break;
-        case ITEM_CLASS_GLYPH:          PriceMinimumCenterBase = PriceMinimumCenterBaseGlyph; break;
+        case ITEM_CLASS_JUNK:           PriceMinimumCenterBase = PriceMinimumCenterBaseMisc; break;
         default:                        break;
         }
     }
@@ -419,8 +448,7 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
         case ITEM_CLASS_QUIVER:         itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryQuiver; break;
         case ITEM_CLASS_QUEST:          itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryQuest; break;
         case ITEM_CLASS_KEY:            itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryKey; break;
-        case ITEM_CLASS_MISC:           itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryMisc; break;
-        case ITEM_CLASS_GLYPH:          itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryGlyph; break;
+        case ITEM_CLASS_JUNK:           itemLevelPriceMultplier = PriceMultiplierItemLevelCategoryMisc; break;
         default:                        break;
     }
 
@@ -455,12 +483,12 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
         outBuyoutPrice = 1;
 }
 
-float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProto)
+float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemPrototype const* itemProto)
 {
     /* "ADVANCED" SUBCLASS PRICE MULTIPLIER FORMULA NOTES
 
       1. multiplierHelper = log(1 + b * ItemLevel)
-      2. 
+      2.
             clothMultiplierHelper ^ p
         ---------------------------------   +   c * (clothMultiplierHelper ^ r)  -  d
           1 + a * clothMultiplierHelper
@@ -472,7 +500,7 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
         c  // Scaling coefficient for second term
         r  // Exponent for second term (adds nonlinear boost)
         d  // Constant shift (adjusts baseline multiplier). This becomes apparent if you graph the equation - it shifts the entire curve down.
-     
+
       Notes:
       - This formula produces a multiplier that grows logarithmically with ItemLevel (uses natural log, not base10)
       - The first term (before '+') heavily influences low item levels, the second term adds some fine-tuning for higher levels.
@@ -487,7 +515,7 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
         {
             case ITEM_SUBCLASS_POTION:
             {
-                if (!AdvancedPricingConsumablePotionEnabled) 
+                if (!AdvancedPricingConsumablePotionEnabled)
                     break;
                 double potionMultiplierHelper = std::log(1.0 + (0.08 * itemProto->ItemLevel));
                 advancedPricingMultiplier = ((std::pow(potionMultiplierHelper,3.0)) / (1 + (4.0 * potionMultiplierHelper))) + (std::pow(potionMultiplierHelper,2.5));
@@ -495,7 +523,7 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
             }
             case ITEM_SUBCLASS_ELIXIR:
             {
-                if (!AdvancedPricingConsumableElixirEnabled) 
+                if (!AdvancedPricingConsumableElixirEnabled)
                     break;
                 double elixirMultiplierHelper = std::log(1.0 + (1.6 * itemProto->ItemLevel));
                 advancedPricingMultiplier = ((std::pow(elixirMultiplierHelper,3.1)) / (1 + (5.0 * elixirMultiplierHelper))) + (0.05 * std::pow(elixirMultiplierHelper,3.2)) - 1.0;
@@ -519,13 +547,13 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
         double gemMultiplierHelper = std::log(1.0 + (0.05 * itemProto->ItemLevel));
         advancedPricingMultiplier = ((std::pow(gemMultiplierHelper,1.0)) / (1 + (10.0 * gemMultiplierHelper))) + (std::pow(gemMultiplierHelper,3.0));
     }
-    else if (itemProto->Class == ITEM_CLASS_TRADE_GOODS) 
+    else if (itemProto->Class == ITEM_CLASS_TRADE_GOODS)
     {
         switch (itemProto->SubClass)
         {
             case ITEM_SUBCLASS_CLOTH:
             {
-                if (!AdvancedPricingTradeGoodClothEnabled) 
+                if (!AdvancedPricingTradeGoodClothEnabled)
                     break;
                 double clothMultiplierHelper = std::log(1.0 + (itemProto->ItemLevel));
                 advancedPricingMultiplier = ((std::pow(clothMultiplierHelper,2.0)) / (1 + (0.8 * clothMultiplierHelper))) + (0.001 * std::pow(clothMultiplierHelper,3.5)) - 0.3;
@@ -533,23 +561,23 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
             }
             case ITEM_SUBCLASS_HERB:
             {
-                if (!AdvancedPricingTradeGoodHerbEnabled) 
+                if (!AdvancedPricingTradeGoodHerbEnabled)
                     break;
                 double herbMultiplierHelper = std::log(1.0 + (5.0 * itemProto->ItemLevel));
-                advancedPricingMultiplier = (std::pow(herbMultiplierHelper,3.0) / (1 + (1.8 * herbMultiplierHelper))) - 4.2; 
+                advancedPricingMultiplier = (std::pow(herbMultiplierHelper,3.0) / (1 + (1.8 * herbMultiplierHelper))) - 4.2;
                 break;
             }
             case ITEM_SUBCLASS_METAL_STONE:
             {
-                if (!AdvancedPricingTradeGoodMetalStoneEnabled) 
+                if (!AdvancedPricingTradeGoodMetalStoneEnabled)
                     break;
                 double metalMultiplierHelper = std::log(1.0 + (75.0 * itemProto->ItemLevel));
-                advancedPricingMultiplier =  ((std::pow(metalMultiplierHelper,3.0)) / (1 + (7.0 * metalMultiplierHelper))) + (0.001 * std::pow(metalMultiplierHelper,3.5)) - 5.2;
+                advancedPricingMultiplier = ((std::pow(metalMultiplierHelper,3.0)) / (1 + (7.0 * metalMultiplierHelper))) + (0.001 * std::pow(metalMultiplierHelper,3.5)) - 5.2;
                 break;
             }
             case ITEM_SUBCLASS_LEATHER:
             {
-                if (!AdvancedPricingTradeGoodLeatherEnabled) 
+                if (!AdvancedPricingTradeGoodLeatherEnabled)
                     break;
                 double leatherMultiplierHelper = std::log(1.0 + (0.25 * itemProto->ItemLevel));
                 advancedPricingMultiplier = ((std::pow(leatherMultiplierHelper,0.15)) / (1 + (2.0 * leatherMultiplierHelper))) + (0.4 * std::pow(leatherMultiplierHelper,3.0)) - 0.2;
@@ -557,15 +585,15 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
             }
             case ITEM_SUBCLASS_ENCHANTING:
             {
-                if (!AdvancedPricingTradeGoodEnchantingEnabled) 
+                if (!AdvancedPricingTradeGoodEnchantingEnabled)
                     break;
                 double enchantingMultiplierHelper = std::log(1.0 + (0.25 * itemProto->ItemLevel));
-                advancedPricingMultiplier = ((std::pow(enchantingMultiplierHelper,0.15)) / (1 + (2.0 * enchantingMultiplierHelper))) + (0.4 * std::pow(enchantingMultiplierHelper,3.0)) - 0.2; 
+                advancedPricingMultiplier = ((std::pow(enchantingMultiplierHelper,0.15)) / (1 + (2.0 * enchantingMultiplierHelper))) + (0.4 * std::pow(enchantingMultiplierHelper,3.0)) - 0.2;
                 break;
             }
             case ITEM_SUBCLASS_ELEMENTAL:
             {
-                if (!AdvancedPricingTradeGoodElementalEnabled) 
+                if (!AdvancedPricingTradeGoodElementalEnabled)
                     break;
                 advancedPricingMultiplier = 85 - (itemProto->ItemLevel / 0.97);
                 break;
@@ -575,29 +603,28 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
                 if (!AdvancedPricingTradeGoodMeatEnabled)
                     break;
                 double meatMultiplierHelper = std::log(1.0 + (0.5 * itemProto->ItemLevel));
-                advancedPricingMultiplier = ((std::pow(meatMultiplierHelper,3.2)) / (1 + (2.0 * meatMultiplierHelper))) + (0.05 * std::pow(meatMultiplierHelper,3.2)) - 0.1; 
+                advancedPricingMultiplier = ((std::pow(meatMultiplierHelper,3.2)) / (1 + (2.0 * meatMultiplierHelper))) + (0.05 * std::pow(meatMultiplierHelper,3.2)) - 0.1;
                 break;
             }
             default:
                 break;
         }
     }
-    else if (itemProto->Class == ITEM_CLASS_MISC)
+    else if (itemProto->Class == ITEM_CLASS_JUNK)
     {
         switch (itemProto->SubClass)
         {
-            // Tuned for pricing lockboxes
             case ITEM_SUBCLASS_JUNK:
             {
-                if (!AdvancedPricingMiscJunkEnabled) 
+                if (!AdvancedPricingMiscJunkEnabled)
                     break;
                 double miscMultiplierHelper = std::log(1.0 + (0.12 * itemProto->ItemLevel));
-                advancedPricingMultiplier = (std::pow(miscMultiplierHelper,3.2) / (1 + miscMultiplierHelper)); 
+                advancedPricingMultiplier = (std::pow(miscMultiplierHelper,3.2) / (1 + miscMultiplierHelper));
                 break;
             }
             case ITEM_SUBCLASS_JUNK_MOUNT:
             {
-                if (!AdvancedPricingMiscMountEnabled) 
+                if (!AdvancedPricingMiscMountEnabled)
                     break;
                 switch (itemProto->Quality)
                 {
@@ -608,7 +635,6 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
                     case ITEM_QUALITY_EPIC:         advancedPricingMultiplier = PriceMultiplierCategoryMountQualityEpic;      break;
                     case ITEM_QUALITY_LEGENDARY:    advancedPricingMultiplier = PriceMultiplierCategoryMountQualityLegendary; break;
                     case ITEM_QUALITY_ARTIFACT:     advancedPricingMultiplier = PriceMultiplierCategoryMountQualityArtifact;  break;
-                    case ITEM_QUALITY_HEIRLOOM:     advancedPricingMultiplier = PriceMultiplierCategoryMountQualityHeirloom;  break;
                     default: break;
                 }
                 break;
@@ -626,7 +652,6 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
                     case ITEM_QUALITY_EPIC:         advancedPricingMultiplier = PriceMultiplierCategoryPetQualityEpic;      break;
                     case ITEM_QUALITY_LEGENDARY:    advancedPricingMultiplier = PriceMultiplierCategoryPetQualityLegendary; break;
                     case ITEM_QUALITY_ARTIFACT:     advancedPricingMultiplier = PriceMultiplierCategoryPetQualityArtifact;  break;
-                    case ITEM_QUALITY_HEIRLOOM:     advancedPricingMultiplier = PriceMultiplierCategoryPetQualityHeirloom;  break;
                     default: break;
                 }
                 break;
@@ -638,7 +663,7 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemTemplate const* itemProt
     return static_cast<float>(advancedPricingMultiplier);
 }
 
-ItemTemplate const* AuctionHouseBot::GetProducedItemFromRecipe(ItemTemplate const* recipeItemTemplate)
+ItemPrototype const* AuctionHouseBot::GetProducedItemFromRecipe(ItemPrototype const* recipeItemTemplate)
 {
     if (!recipeItemTemplate)
         return nullptr;
@@ -646,18 +671,18 @@ ItemTemplate const* AuctionHouseBot::GetProducedItemFromRecipe(ItemTemplate cons
     {
         if (recipeItemTemplate->Spells[i].SpellId)
         {
-            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(recipeItemTemplate->Spells[i].SpellId);
-            if (!spellInfo)
+            SpellEntry const* spellEntry = sSpellMgr.GetSpellEntry(recipeItemTemplate->Spells[i].SpellId);
+            if (!spellEntry)
                 continue;
 
-            for (auto const& effect : spellInfo->Effects)
+            for (uint8 effIndex = 0; effIndex < MAX_EFFECT_INDEX; ++effIndex)
             {
-                if (effect.Effect == SPELL_EFFECT_CREATE_ITEM)
+                if (spellEntry->Effect[effIndex] == SPELL_EFFECT_CREATE_ITEM)
                 {
-                    uint32 createdItemId = effect.ItemType;
+                    uint32 createdItemId = spellEntry->EffectItemType[effIndex];
                     if (createdItemId)
                     {
-                        ItemTemplate const* producedItem = sObjectMgr->GetItemTemplate(createdItemId);
+                        ItemPrototype const* producedItem = sObjectMgr.GetItemPrototype(createdItemId);
                         if (producedItem)
                             return producedItem;
                     }
@@ -681,26 +706,24 @@ static const std::unordered_set<uint32> professionSkills = {
     333,  // Enchanting
     356,  // Fishing
     393,  // Skinning
-    755,  // Jewelcrafting
-    773,  // Inscription
     129   // First Aid
 };
 
 std::unordered_set<uint32> AuctionHouseBot::GetItemIDsProducedByRecipes()
 {
     std::unordered_set<uint32> recipeItemIDs;
-    for (uint32 spellId = 1; spellId < sSpellStore.GetNumRows(); ++spellId)
+    for (uint32 spellId = 1; spellId < sSpellMgr.GetMaxSpellId(); ++spellId)
     {
-        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
-        if (!spellInfo)
+        SpellEntry const* spellEntry = sSpellMgr.GetSpellEntry(spellId);
+        if (!spellEntry)
             continue;
 
         // Check if the spell is tied to a profession skill
         bool isProfessionSpell = false;
-        SkillLineAbilityMapBounds skillBounds = sSpellMgr->GetSkillLineAbilityMapBounds(spellId);
+        SkillLineAbilityMapBounds skillBounds = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
         for (SkillLineAbilityMap::const_iterator skillItr = skillBounds.first; skillItr != skillBounds.second; ++skillItr)
         {
-            if (professionSkills.find(skillItr->second->SkillLine) != professionSkills.end())
+            if (professionSkills.find(skillItr->second->skillId) != professionSkills.end())
             {
                 isProfessionSpell = true;
                 break;
@@ -711,11 +734,11 @@ std::unordered_set<uint32> AuctionHouseBot::GetItemIDsProducedByRecipes()
             continue;
 
         // SPELL_EFFECT_CREATE_ITEM (effect ID 24) identify created items
-        for (uint8 effIndex = 0; effIndex < MAX_SPELL_EFFECTS; ++effIndex)
+        for (uint8 effIndex = 0; effIndex < MAX_EFFECT_INDEX; ++effIndex)
         {
-            if (spellInfo->Effects[effIndex].Effect == SPELL_EFFECT_CREATE_ITEM && spellInfo->Effects[effIndex].ItemType > 0)
+            if (spellEntry->Effect[effIndex] == SPELL_EFFECT_CREATE_ITEM && spellEntry->EffectItemType[effIndex] > 0)
             {
-                uint32 itemID = spellInfo->Effects[effIndex].ItemType;
+                uint32 itemID = spellEntry->EffectItemType[effIndex];
                 recipeItemIDs.insert(itemID);
             }
         }
@@ -723,7 +746,7 @@ std::unordered_set<uint32> AuctionHouseBot::GetItemIDsProducedByRecipes()
     return recipeItemIDs;
 }
 
-bool AuctionHouseBot::IsItemADisabledRecipeProducedClassSubclass(ItemTemplate const* itemTemplate)
+bool AuctionHouseBot::IsItemADisabledRecipeProducedClassSubclass(ItemPrototype const* itemTemplate)
 {
     if (DisabledRecipeProducedItemClassSubClasses.find(itemTemplate->Class) == DisabledRecipeProducedItemClassSubClasses.end())
         return false;
@@ -755,8 +778,8 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
     ItemIDsProducedByRecipes = GetItemIDsProducedByRecipes();
 
     // Fill candidate item templates
-    ItemTemplateContainer const* its = sObjectMgr->GetItemTemplateStore();
-    for (ItemTemplateContainer::const_iterator itr = its->begin(); itr != its->end(); ++itr)
+    ItemPrototypeMap const& itemPrototypeMap = sObjectMgr.GetItemPrototypeMap();
+    for (ItemPrototypeMap::const_iterator itr = itemPrototypeMap.begin(); itr != itemPrototypeMap.end(); ++itr)
     {
         // Never store curBlock zero
         if (itr->second.ItemId == 0)
@@ -773,11 +796,11 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
                 // Recipes might need to consider produced items
                 if (ListedItemLevelRestrictedUseCraftedItemForCalculation == true && itr->second.Class == ITEM_CLASS_RECIPE)
                 {
-                    ItemTemplate const* producedItemTemplate = GetProducedItemFromRecipe(&itr->second);
+                    ItemPrototype const* producedItemTemplate = GetProducedItemFromRecipe(&itr->second);
                     if (producedItemTemplate != nullptr)
                     {
                         if (debug_Out_Filters)
-                            LOG_ERROR("module", "AuctionHouseBot: Using item {} for recipe {} for item level comparison since ListedItemLevelRestrictedUseCraftedItemForCalculation is true", producedItemTemplate->ItemId, itr->second.ItemId);
+                            sLog.outError("AuctionHouseBot: Using item %u for recipe %u for item level comparison since ListedItemLevelRestrictedUseCraftedItemForCalculation is true", producedItemTemplate->ItemId, itr->second.ItemId);
                         itemLevelToCompare = producedItemTemplate->ItemLevel;
                     }
                 }
@@ -785,13 +808,13 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
                 if (itemLevelToCompare < ListedItemLevelMin)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item level is lower than ListedItemLevelRestrict.MinItemLevel", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item level is lower than ListedItemLevelRestrict.MinItemLevel", itr->second.ItemId);
                     continue;
                 }
                 if (itemLevelToCompare > ListedItemLevelMax)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item level is higher than ListedItemLevelRestrict.MaxItemLevel", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item level is higher than ListedItemLevelRestrict.MaxItemLevel", itr->second.ItemId);
                     continue;
                 }
             }
@@ -806,13 +829,13 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
                 if (itr->second.ItemId < ListedItemIDMin)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item id is lower than ListedItemLevelRestrict.MinItemID", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item id is lower than ListedItemLevelRestrict.MinItemID", itr->second.ItemId);
                     continue;
                 }
                 if (itr->second.ItemId > ListedItemIDMax)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item id is higher than ListedItemLevelRestrict.MaxItemID", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item id is higher than ListedItemLevelRestrict.MaxItemID", itr->second.ItemId);
                     continue;
                 }
             }
@@ -829,13 +852,13 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
                 if (useOrEquipLevelCompare > 0 && useOrEquipLevelCompare < ListedItemUseOrEquipRestrictMinLevel)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item use or equip level is lower than EquipItemUseOrEquipLevelRestrict.MinItemLevel", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item use or equip level is lower than EquipItemUseOrEquipLevelRestrict.MinItemLevel", itr->second.ItemId);
                     continue;
                 }
                 if (useOrEquipLevelCompare > 0 && useOrEquipLevelCompare > ListedItemUseOrEquipRestrictMaxLevel)
                 {
                     if (debug_Out_Filters)
-                        LOG_ERROR("module", "AuctionHouseBot: Item {} disabled since item use or equip level is higher than EquipItemUseOrEquipLevelRestrict.MaxItemLevel", itr->second.ItemId);
+                        sLog.outError("AuctionHouseBot: Item %u disabled since item use or equip level is higher than EquipItemUseOrEquipLevelRestrict.MaxItemLevel", itr->second.ItemId);
                     continue;
                 }
             }
@@ -845,7 +868,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (DisabledItems.find(itr->second.ItemId) != DisabledItems.end())
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Configured by DisabledItemIDs and DisabledCraftedItemIDs)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Configured by DisabledItemIDs and DisabledCraftedItemIDs)", itr->second.ItemId);
             continue;
         }
 
@@ -855,7 +878,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
             if (IsItemADisabledRecipeProducedClassSubclass(&itr->second) == true)
             {
                 if (debug_Out_Filters)
-                    LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Configured by DisabledRecipeProducedItemFilterEnabled and DisabledRecipeProducedItemClassSubClasses)", itr->second.ItemId);
+                    sLog.outError("AuctionHouseBot: Item %u disabled (Configured by DisabledRecipeProducedItemFilterEnabled and DisabledRecipeProducedItemClassSubClasses)", itr->second.ItemId);
                 continue;
             }
         }
@@ -871,7 +894,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Bonding == BIND_WHEN_PICKED_UP || itr->second.Bonding == BIND_QUEST_ITEM)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (BOP or BQI)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (BOP or BQI)", itr->second.ItemId);
             continue;
         }
 
@@ -883,7 +906,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.IsConjuredConsumable())
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Conjured Consumable)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Conjured Consumable)", itr->second.ItemId);
             continue;
         }
 
@@ -891,7 +914,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Class == ITEM_CLASS_MONEY)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Money)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Money)", itr->second.ItemId);
             continue;
         }
 
@@ -899,7 +922,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.MinMoneyLoot > 0)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (MoneyLoot)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (MoneyLoot)", itr->second.ItemId);
             continue;
         }
 
@@ -907,7 +930,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Duration > 0)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Has a Duration)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Has a Duration)", itr->second.ItemId);
             continue;
         }
 
@@ -915,7 +938,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Class == ITEM_CLASS_CONTAINER && itr->second.ContainerSlots == 0)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Container with no slots)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Container with no slots)", itr->second.ItemId);
             continue;
         }
 
@@ -923,25 +946,25 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Class == ITEM_CLASS_RECIPE && itr->second.SubClass == ITEM_SUBCLASS_BOOK && itr->second.Quality <= ITEM_QUALITY_NORMAL)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled (Normal or lower recipe book)", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled (Normal or lower recipe book)", itr->second.ItemId);
             continue;
         }
 
         // Disable anything with the string literal of a testing or deprecated item
-        if (DisabledItemTextFilter == true && 
+        if (DisabledItemTextFilter == true &&
             (itr->second.Name1.find("Test ") != std::string::npos ||
             itr->second.Name1.find("TEST") != std::string::npos ||
             itr->second.Name1.find("Deprecated") != std::string::npos ||
             itr->second.Name1.find("Depricated") != std::string::npos ||
             itr->second.Name1.find(" Epic ") != std::string::npos ||
-            itr->second.Name1.find("]") != std::string::npos ||            
+            itr->second.Name1.find("]") != std::string::npos ||
             itr->second.Name1.find("D'Sak") != std::string::npos ||
             itr->second.Name1.find("(") != std::string::npos ||
             itr->second.Name1.find("OLD") != std::string::npos ||
             itr->second.Name1.find("PVP") != std::string::npos))
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled item with a temp or unused item name", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled item with a temp or unused item name", itr->second.ItemId);
             continue;
         }
 
@@ -949,7 +972,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.Class == ITEM_CLASS_GEM && itr->second.Name1.find("Perfect ") != std::string::npos)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled as it's a perfect crafted gem", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled as it's a perfect crafted gem", itr->second.ItemId);
             continue;
         }
 
@@ -960,7 +983,7 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (hasNoPrice == true && isItemEnhancement == false && isEnchantingTradeGood == false)
         {
             if (debug_Out_Filters)
-                LOG_ERROR("module", "AuctionHouseBot: Item {} disabled misc item", itr->second.ItemId);
+                sLog.outError("AuctionHouseBot: Item %u disabled misc item", itr->second.ItemId);
             continue;
         }
 
@@ -971,14 +994,14 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
     // Show any debugging information
     if (debug_Out)
     {
-        LOG_INFO("module", "AHBot Candidate item counts by item category (class) and quality after appyling filters:");
+        sLog.outString("AHBot Candidate item counts by item category (class) and quality after appyling filters:");
         for (auto& itemCandidateQualityGroupInClass : ItemCandidatesByItemClassAndQuality)
             for (auto& itemCandidateInQualityGroup : itemCandidateQualityGroupInClass.second)
             {
                 uint32 classID = itemCandidateQualityGroupInClass.first;
                 uint32 qualityID = itemCandidateInQualityGroup.first;
                 size_t elementCount = itemCandidateInQualityGroup.second.size();
-                LOG_INFO("module", "Item count in class {} quality {} is {}", classID, qualityID, elementCount);
+                sLog.outString("Item count in class %u quality %u is %zu", classID, qualityID, elementCount);
             }
     }
 
@@ -1000,7 +1023,7 @@ uint32 AuctionHouseBot::GetRandomItemIDForListing()
     // Start with a listing proportion
     if (ItemListProportionNodesLookup.size() == 0)
     {
-        LOG_ERROR("module", "No valid list proportion for new listing could be found (ItemListProportionNodesLookup was empty)");
+        sLog.outError("No valid list proportion for new listing could be found (ItemListProportionNodesLookup was empty)");
         SellingBotEnabled = false;
         return 0;
     }
@@ -1010,7 +1033,7 @@ uint32 AuctionHouseBot::GetRandomItemIDForListing()
     size_t numOfValidItemsInGroup = ItemCandidatesByItemClassAndQuality[listProportionNode.ItemClassID][listProportionNode.ItemQualityID].size();
     if (numOfValidItemsInGroup == 0)
     {
-        LOG_ERROR("module", "Unable to find a candidate item with Category (class) {} and Quality {}", listProportionNode.ItemClassID, listProportionNode.ItemQualityID);
+        sLog.outError("Unable to find a candidate item with Category (class) %u and Quality %u", listProportionNode.ItemClassID, listProportionNode.ItemQualityID);
         return 0;
     }
     return ItemCandidatesByItemClassAndQuality[listProportionNode.ItemClassID][listProportionNode.ItemQualityID][urand(0, numOfValidItemsInGroup-1)];
@@ -1021,7 +1044,7 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
     if (!SellingBotEnabled)
     {
         if (debug_Out)
-            LOG_INFO("module", "AHSeller: Disabled");
+            sLog.outString("AHSeller: Disabled");
         return;
     }
 
@@ -1031,29 +1054,29 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
     if (maxItems == 0)
         return;
 
-    AuctionHouseEntry const* ahEntry = sAuctionMgr->GetAuctionHouseEntryFromFactionTemplate(config->GetAHFID());
+    AuctionHouseEntry const* ahEntry = sAuctionMgr.GetAuctionHouseEntry(config->GetAHFID());
     if (!ahEntry)
     {
         return;
     }
-    AuctionHouseObject* auctionHouse =  sAuctionMgr->GetAuctionsMap(config->GetAHFID());
+    AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(ahEntry);
     if (!auctionHouse)
     {
         return;
     }
 
-    uint32 currentAuctionItemListCount = auctionHouse->Getcount();
+    uint32 currentAuctionItemListCount = auctionHouse->GetCount();
     if (currentAuctionItemListCount >= minItems)
     {
         if (debug_Out)
-            LOG_INFO("module", "AHSeller: Auctions above minimum, so no auctions will be listed this cycle");
+            sLog.outString("AHSeller: Auctions above minimum, so no auctions will be listed this cycle");
         return;
     }
 
     if (currentAuctionItemListCount >= maxItems)
     {
         if (debug_Out)
-            LOG_INFO("module", "AHSeller: Auctions at or above maximum, so no auctions will be listed this cycle");
+            sLog.outString("AHSeller: Auctions at or above maximum, so no auctions will be listed this cycle");
         return;
     }
 
@@ -1064,146 +1087,139 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
         newItemsToListCount = (maxItems - currentAuctionItemListCount);
 
     if (debug_Out)
-        LOG_INFO("module", "AHSeller: Adding {} Auctions", newItemsToListCount);
+        sLog.outString("AHSeller: Adding %u Auctions", newItemsToListCount);
 
     if (debug_Out)
-        LOG_INFO("module", "AHSeller: Current house id is {}", config->GetAHID());
+        sLog.outString("AHSeller: Current house id is %u", config->GetAHID());
 
     // only insert a few at a time, so as not to peg the processor
     uint32 itemsGenerated = 0;
+
+    CharacterDatabase.BeginTransaction();
+
     for (uint32 cnt = 1; cnt <= newItemsToListCount; cnt++)
     {
-        auto trans = CharacterDatabase.BeginTransaction();
-        ItemTemplate const* prototype = nullptr;
-        uint32 batchCount = 0;
+        // GetRandomItemIDForListing can disable the seller mid-cycle, and every failed attempt must count
+        // against the batch limit or a misconfigured item list spins this loop forever on the world thread
+        if (!SellingBotEnabled)
+            break;
 
-        while (batchCount < 500 && itemsGenerated < newItemsToListCount)
+        // Either generate a new item ID to list, or grab from the remaining list
+        uint32 itemID;
+        ItemPrototype const* prototype = nullptr;
+        if (ActiveListMultipleItemID != 0)
         {
-            // GetRandomItemIDForListing can disable the seller mid-cycle, and every failed attempt must count
-            // against the batch limit or a misconfigured item list spins this loop forever on the world thread
-            if (!SellingBotEnabled)
-                break;
+            itemID = ActiveListMultipleItemID;
 
-            // Either generate a new item ID to list, or grab from the remaining list
-            uint32 itemID;
-            if (ActiveListMultipleItemID != 0)
-            {
-                itemID = ActiveListMultipleItemID;
-
-                prototype = sObjectMgr->GetItemTemplate(itemID);
-                if (!prototype)
-                {
-                    if (debug_Out)
-                        LOG_ERROR("module", "AHSeller: prototype == NULL");
-                    ActiveListMultipleItemID = 0;
-                    batchCount++;
-                    continue;
-                }
-
-                RemainingListMultipleCount--;
-                if (RemainingListMultipleCount <= 0)
-                    ActiveListMultipleItemID = 0;
-            }
-            else
-            {
-                itemID = GetRandomItemIDForListing();
-                if (itemID == 0)
-                {
-                    if (debug_Out)
-                        LOG_ERROR("module", "AHSeller: Item::CreateItem() failed as the ItemID is 0");
-                    batchCount++;
-                    continue;
-                }
-
-                prototype = sObjectMgr->GetItemTemplate(itemID);
-                if (!prototype)
-                {
-                    if (debug_Out)
-                        LOG_ERROR("module", "AHSeller: prototype == NULL");
-                    batchCount++;
-                    continue;
-                }
-
-                if (IsItemEligibleForDBDropRates(prototype))
-                {
-                    bool foundDBDropRatesItem = HandleAdvancedListingRuleUseDropRates(prototype);
-                    if (foundDBDropRatesItem)
-                        itemID = prototype->ItemId;
-                    else
-                    {
-                        batchCount++;
-                        continue;
-                    }
-                }
-
-                if (ItemListProportionMultipliedItemIDs.find(itemID) != ItemListProportionMultipliedItemIDs.end() &&
-                    ItemListProportionMultipliedItemIDs[itemID] > 1)
-                {
-                    ActiveListMultipleItemID = itemID;
-                    RemainingListMultipleCount = ItemListProportionMultipliedItemIDs[itemID] - 1;
-                    if (debug_Out)
-                        LOG_INFO("module", "AHSeller: Is listing item ID {} which is configured for {} multiples from ListMultipliedItemIDs", itemID, ItemListProportionMultipliedItemIDs[itemID]);
-                }
-            }
-
-            Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
-
-            Item* item = Item::CreateItem(itemID, 1, AHBplayer);
-            if (item == NULL)
+            prototype = sObjectMgr.GetItemPrototype(itemID);
+            if (!prototype)
             {
                 if (debug_Out)
-                    LOG_ERROR("module", "AHSeller: Item::CreateItem() returned NULL");
-                break;
+                    sLog.outError("AHSeller: prototype == NULL");
+                ActiveListMultipleItemID = 0;
+                continue;
             }
-            item->AddToUpdateQueueOf(AHBplayer);
 
-            uint32 randomPropertyId = Item::GenerateItemRandomPropertyId(itemID);
-            if (randomPropertyId != 0)
-                item->SetItemRandomProperties(randomPropertyId);
+            RemainingListMultipleCount--;
+            if (RemainingListMultipleCount <= 0)
+                ActiveListMultipleItemID = 0;
+        }
+        else
+        {
+            itemID = GetRandomItemIDForListing();
+            if (itemID == 0)
+            {
+                if (debug_Out)
+                    sLog.outError("AHSeller: Item::CreateItem() failed as the ItemID is 0");
+                continue;
+            }
 
-            // Determine price
-            uint64 buyoutPrice = 0;
-            uint64 bidPrice = 0;
-            CalculateItemValue(prototype, bidPrice, buyoutPrice);
+            prototype = sObjectMgr.GetItemPrototype(itemID);
+            if (!prototype)
+            {
+                if (debug_Out)
+                    sLog.outError("AHSeller: prototype == NULL");
+                continue;
+            }
 
-            // Define a duration
-            uint32 etime = urand(ListingExpireTimeInSecondsMin, ListingExpireTimeInSecondsMax);
+            if (IsItemEligibleForDBDropRates(prototype))
+            {
+                bool foundDBDropRatesItem = HandleAdvancedListingRuleUseDropRates(prototype);
+                if (foundDBDropRatesItem)
+                    itemID = prototype->ItemId;
+                else
+                {
+                    continue;
+                }
+            }
 
-            // Set stack size
-            uint32 stackCount = GetStackSizeForItem(prototype);
-            item->SetCount(stackCount);
-
-            uint32 dep =  sAuctionMgr->GetAuctionDeposit(ahEntry, etime, item, stackCount);
-
-            AuctionEntry* auctionEntry = new AuctionEntry();
-            auctionEntry->Id = sObjectMgr->GenerateAuctionID();
-            auctionEntry->houseId = AuctionHouseId(config->GetAHID());
-            auctionEntry->item_guid = item->GetGUID();
-            auctionEntry->item_template = item->GetEntry();
-            auctionEntry->itemCount = item->GetCount();
-            auctionEntry->owner = AHBplayer->GetGUID();
-            auctionEntry->startbid = bidPrice * stackCount;
-            auctionEntry->buyout = buyoutPrice * stackCount;
-            auctionEntry->bid = 0;
-            auctionEntry->deposit = dep;
-            auctionEntry->expire_time = (time_t) etime + time(NULL);
-            auctionEntry->auctionHouseEntry = ahEntry;
-            item->SaveToDB(trans);
-            item->RemoveFromUpdateQueueOf(AHBplayer);
-            sAuctionMgr->AddAItem(item);
-            auctionHouse->AddAuction(auctionEntry);
-            auctionEntry->SaveToDB(trans);
-            itemsGenerated++;
-            batchCount++;
+            if (ItemListProportionMultipliedItemIDs.find(itemID) != ItemListProportionMultipliedItemIDs.end() &&
+                ItemListProportionMultipliedItemIDs[itemID] > 1)
+            {
+                ActiveListMultipleItemID = itemID;
+                RemainingListMultipleCount = ItemListProportionMultipliedItemIDs[itemID] - 1;
+                if (debug_Out)
+                    sLog.outString("AHSeller: Is listing item ID %u which is configured for %u multiples from ListMultipliedItemIDs", itemID, ItemListProportionMultipliedItemIDs[itemID]);
+            }
         }
 
-        CharacterDatabase.CommitTransaction(trans);
+        Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
+
+        Item* item = Item::CreateItem(itemID, 1, AHBplayer);
+        if (item == NULL)
+        {
+            if (debug_Out)
+                sLog.outError("AHSeller: Item::CreateItem() returned NULL");
+            break;
+        }
+        item->AddToUpdateQueueOf(AHBplayer);
+
+        uint32 randomPropertyId = Item::GenerateItemRandomPropertyId(itemID);
+        if (randomPropertyId != 0)
+            item->SetItemRandomProperties(randomPropertyId);
+
+        // Determine price
+        uint64 buyoutPrice = 0;
+        uint64 bidPrice = 0;
+        CalculateItemValue(prototype, bidPrice, buyoutPrice);
+
+        // Define a duration
+        uint32 etime = urand(ListingExpireTimeInSecondsMin, ListingExpireTimeInSecondsMax);
+
+        // Set stack size
+        uint32 stackCount = GetStackSizeForItem(prototype);
+        item->SetCount(stackCount);
+
+        uint32 dep = sAuctionMgr.GetAuctionDeposit(ahEntry, etime, item);
+
+        AuctionEntry* auctionEntry = new AuctionEntry();
+        auctionEntry->Id = sObjectMgr.GenerateAuctionID();
+        auctionEntry->auctionHouseEntry = ahEntry;
+        auctionEntry->itemGuidLow = item->GetGUIDLow();
+        auctionEntry->itemTemplate = item->GetEntry();
+        auctionEntry->owner = AHBplayer->GetGUIDLow();
+        auctionEntry->ownerAccount = AHBplayer->GetSession()->GetAccountId();
+        auctionEntry->startbid = static_cast<uint32>(bidPrice * stackCount);
+        auctionEntry->buyout = static_cast<uint32>(buyoutPrice * stackCount);
+        auctionEntry->bid = 0;
+        auctionEntry->bidder = 0;
+        auctionEntry->deposit = dep;
+        auctionEntry->expireTime = (time_t) etime + time(NULL);
+        item->SaveToDB();
+        item->RemoveFromUpdateQueueOf(AHBplayer);
+        sAuctionMgr.AddAItem(item);
+        auctionHouse->AddAuction(auctionEntry);
+        auctionEntry->SaveToDB();
+        itemsGenerated++;
     }
+
+    CharacterDatabase.CommitTransaction();
+
     if (debug_Out)
-        LOG_INFO("module", "AHSeller: Added {} items", itemsGenerated);
+        sLog.outString("AHSeller: Added %u items", itemsGenerated);
 }
 
-bool AuctionHouseBot::HandleAdvancedListingRuleUseDropRates(ItemTemplate const*& proto)
+bool AuctionHouseBot::HandleAdvancedListingRuleUseDropRates(ItemPrototype const*& proto)
 {
     // The AHBot has chosen a rare/epic armor/weapon/recipe, so select another item
     //   of that type based on drop rates. This way ListProportions are respected.
@@ -1227,12 +1243,12 @@ bool AuctionHouseBot::HandleAdvancedListingRuleUseDropRates(ItemTemplate const*&
     auto& bucket = tierBuckets[tier];
     if (!bucket.empty())
     {
-        itemID = bucket[rand() % bucket.size()];
-        proto = sObjectMgr->GetItemTemplate(itemID);
+        itemID = bucket[urand(0, bucket.size() - 1)];
+        proto = sObjectMgr.GetItemPrototype(itemID);
         if (!proto)
         {
             if (debug_Out)
-                LOG_ERROR("module", "AHSeller: prototype == NULL");
+                sLog.outError("AHSeller: prototype == NULL");
             return false;
         }
     }
@@ -1249,7 +1265,7 @@ void AuctionHouseBot::PopulateItemDropChances()
         !AdvancedListingRuleUseDropRatesArmorEnabled &&
         !AdvancedListingRuleUseDropRatesRecipeEnabled)
     {
-        LOG_ERROR("module", "AuctionHouseBot: No categories are enabled for AuctionHouseBot.Seller.AdvancedListingRules.UseDropRates");
+        sLog.outError("AuctionHouseBot: No categories are enabled for AuctionHouseBot.Seller.AdvancedListingRules.UseDropRates");
         return;
     }
 
@@ -1274,23 +1290,25 @@ void AuctionHouseBot::PopulateItemDropChances()
         handleDropChancesForCategoryAndQuality(ITEM_CLASS_RECIPE, AdvancedListingRuleUseDropRatesRecipeAffectedQualities);
 
     // Erase item candidates that are not crafted, not quest rewards, and missing DB drop rate
-    for (auto& [classID, qualityGroups] : ItemCandidatesByItemClassAndQuality)
+    for (auto& classQualityPair : ItemCandidatesByItemClassAndQuality)
     {
-        for (auto& [qualityID, candidates] : qualityGroups)
+        auto& qualityGroups = classQualityPair.second;
+        for (auto& qualityCandidatesPair : qualityGroups)
         {
+            auto& candidates = qualityCandidatesPair.second;
             candidates.erase(
                 std::remove_if(
                     candidates.begin(),
                     candidates.end(),
                     [&](uint32 id)
                     {
-                        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(id);
+                        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(id);
                         if (!IsItemCategoryQualityInDBDropRatesConfig(proto))
                             return false;
 
                         bool shouldErase = !IsItemCrafted(id)
                                         && !IsItemQuestReward(id)
-                                        && !CachedItemDropRates.contains(id);
+                                        && (CachedItemDropRates.find(id) == CachedItemDropRates.end());
 
                         return shouldErase;
                     }),
@@ -1302,7 +1320,7 @@ void AuctionHouseBot::PopulateItemDropChances()
     if (debug_Out)
     {
         // Show number of items in each tier
-        LOG_INFO("module", "AHBot AdvancedListingRule UseDropRates item counts by class and quality after appyling filters:");
+        sLog.outString("AHBot AdvancedListingRule UseDropRates item counts by class and quality after appyling filters:");
         for (size_t i = 0; i < ItemTiersByClassAndQuality.size(); ++i)
         {
             const auto& qualities = ItemTiersByClassAndQuality[i];
@@ -1313,11 +1331,11 @@ void AuctionHouseBot::PopulateItemDropChances()
                 {
                     const auto& items = tiers[k];
                     if (i == ITEM_CLASS_WEAPON)
-                        LOG_INFO("module", "Weapon Count: {} Tier {} has {} items", GetQualityName((ItemQualities)j), k, items.size());
+                        sLog.outString("Weapon Count: %s Tier %zu has %zu items", GetQualityName((ItemQualities)j), k, items.size());
                     if (i == ITEM_CLASS_ARMOR)
-                        LOG_INFO("module", "Armor Count: {} Tier {} has {} items", GetQualityName((ItemQualities)j), k, items.size());
+                        sLog.outString("Armor Count: %s Tier %zu has %zu items", GetQualityName((ItemQualities)j), k, items.size());
                     if (i == ITEM_CLASS_RECIPE)
-                        LOG_INFO("module", "Recipe Count: {} Tier {} has {} items", GetQualityName((ItemQualities)j), k, items.size());
+                        sLog.outString("Recipe Count: %s Tier %zu has %zu items", GetQualityName((ItemQualities)j), k, items.size());
                 }
             }
         }
@@ -1328,7 +1346,7 @@ void AuctionHouseBot::PopulateItemDropChancesForCategoryAndQuality(ItemClass cat
 {
     if (qualities.empty())
     {
-        LOG_ERROR("module", "AuctionHouseBot: PopulateItemDropChancesForCategoryAndQuality() qualities are not set. "
+        sLog.outError("AuctionHouseBot: PopulateItemDropChancesForCategoryAndQuality() qualities are not set. "
                             "Verify that mod_ahbot.conf has values for AdvancedListingRules.UseDropRates.<Category>.AffectedQualities. "
                             "Defaulting to '2,3,4,5' to prevent crash.");
         qualities = "2,3,4,5";
@@ -1336,166 +1354,177 @@ void AuctionHouseBot::PopulateItemDropChancesForCategoryAndQuality(ItemClass cat
 
     // Search creature loot templates, referenced loot_loot_template, group_loot tables, and object_loot tables for items' drop rates
     std::string directDropString = R"SQL(
-        with chances AS (
-			SELECT it.entry     AS itemID, 
-                clt.Chance      AS direct_chance, 
-                0               AS reference_chance
-            FROM creature_template ct
-            JOIN creature_loot_template clt ON clt.Entry = ct.lootid
-            JOIN item_template it ON it.entry = clt.Item
-            WHERE clt.Reference = 0 AND clt.GroupId = 0 AND it.class IN ({}) AND it.quality IN ({})
-        )
-        SELECT itemID,
-                MIN(direct_chance)  AS direct_chance,
-                0                   AS reference_chance
-                FROM chances 
-                GROUP BY itemID
+        SELECT clt.item AS itemID,
+               ABS(clt.ChanceOrQuestChance) AS direct_chance,
+               0 AS reference_chance
+        FROM creature_loot_template clt
+        JOIN item_template it ON it.entry = clt.item
+        WHERE clt.mincountOrRef >= 0
+          AND clt.groupid = 0
+          AND clt.ChanceOrQuestChance != 0
+          AND it.class IN (%u)
+          AND it.quality IN (%s)
     )SQL";
 
     std::string referenceDropString = R"SQL(
-        WITH chances AS (
-            SELECT 
-                rlt.Item AS itemID,
-                CASE
-                    WHEN COUNT(clt.Entry) > 0 THEN
-                        (1.0 / CASE WHEN rgc.groupCount < 6 THEN 6 ELSE rgc.groupCount END)
-                        * COALESCE(NULLIF(rlt.Chance,0),1)
-                        * COALESCE(NULLIF(MIN(clt.Chance),0),1)
-                    ELSE
-                        (1.0 / rgc.groupCount) * COALESCE(NULLIF(rlt.Chance,0),1)
-                END AS reference_chance
+        WITH creature_refs AS (
+            SELECT -clt.mincountOrRef AS ref_entry,
+                   LEAST(100.0, ABS(clt.ChanceOrQuestChance) * GREATEST(clt.maxcount, 1)) AS ref_chance
+            FROM creature_loot_template clt
+            WHERE clt.mincountOrRef < 0
+        ),
+        ref_direct AS (
+            SELECT rlt.entry AS ref_entry,
+                   rlt.item AS item_id,
+                   rlt.ChanceOrQuestChance AS item_chance,
+                   it.class AS itemClass,
+                   it.quality AS itemQuality
             FROM reference_loot_template rlt
-            JOIN (
-                SELECT entry, COUNT(*) AS groupCount
-                FROM reference_loot_template
-                GROUP BY entry
-            ) rgc ON rlt.Entry = rgc.entry
-            LEFT JOIN creature_loot_template clt
-                ON clt.Reference = rlt.Entry
-                AND clt.Comment NOT LIKE '%Placeholder%'
-            JOIN item_template it ON it.entry = rlt.Item
-            WHERE it.class IN ({})
-              AND it.quality IN ({})
-            GROUP BY rlt.Entry, rlt.Item, rlt.Chance, rgc.groupCount
+            JOIN item_template it ON it.entry = rlt.item
+            WHERE rlt.groupid = 0
+              AND rlt.mincountOrRef >= 0
+        ),
+        ref_group_counts AS (
+            SELECT rlt.entry AS ref_entry,
+                   rlt.groupid AS group_id,
+                   COUNT(*) AS item_count
+            FROM reference_loot_template rlt
+            WHERE rlt.groupid != 0
+              AND rlt.mincountOrRef >= 0
+            GROUP BY rlt.entry, rlt.groupid
+        ),
+        ref_group AS (
+            SELECT rlt.entry AS ref_entry,
+                   rlt.item AS item_id,
+                   rlt.ChanceOrQuestChance AS chance,
+                   rgc.item_count,
+                   it.class AS itemClass,
+                   it.quality AS itemQuality
+            FROM reference_loot_template rlt
+            JOIN ref_group_counts rgc ON rlt.entry = rgc.ref_entry AND rlt.groupid = rgc.group_id
+            JOIN item_template it ON it.entry = rlt.item
+            WHERE rlt.groupid != 0
+              AND rlt.mincountOrRef >= 0
         )
-        SELECT itemID,
-               0                     AS direct_chance,
-               MIN(reference_chance) AS reference_chance
-        FROM chances 
-        GROUP BY itemID
+        SELECT item_id AS itemID,
+               0 AS direct_chance,
+               MIN(cr.ref_chance * item_drop_chance / 100.0) AS reference_chance
+        FROM (
+            SELECT rd.ref_entry, rd.item_id, rd.itemClass, rd.itemQuality,
+                   ABS(rd.item_chance) AS item_drop_chance
+            FROM ref_direct rd
+            UNION ALL
+            SELECT rg.ref_entry, rg.item_id, rg.itemClass, rg.itemQuality,
+                   CASE
+                       WHEN ABS(rg.chance) = 0 THEN (1.0 / rg.item_count) * (1 - POWER(1 - (1.0 / rg.item_count), rg.item_count)) * 100
+                       ELSE ((1.0 / rg.item_count) * (1 - POWER(1 - (1.0 / rg.item_count), rg.item_count)) * 100) * ABS(rg.chance) / 100
+                   END AS item_drop_chance
+            FROM ref_group rg
+        ) combined
+        JOIN creature_refs cr ON combined.ref_entry = cr.ref_entry
+        WHERE combined.itemClass IN (%u)
+          AND combined.itemQuality IN (%s)
+        GROUP BY item_id
     )SQL";
 
-    // This will lookup items in referenced_loot_template whose Reference entry is not associated with a creature_loot_template
+    // This was used to catch references not linked to any creature.  Tortoise uses a different
+    // reference model, so this query is left empty; the other queries already cover the bulk
+    // of obtainable items.
     std::string danglingReferenceDropString = R"SQL(
-        WITH reference_group_counts AS (
-            SELECT entry AS referenceID, COUNT(*) AS groupCount
-            FROM reference_loot_template
-            GROUP BY entry
-        ),
-        creature_references AS (
-            SELECT DISTINCT Reference AS referenceID FROM creature_loot_template WHERE REFERENCE != 0
-        ),
-        reference_data AS (
-            SELECT 
-                rlt.Entry  AS referenceID,
-                rlt.Item   AS itemID,
-                rlt.Chance AS referenceChance,
-                rgc.groupCount
-            FROM reference_loot_template rlt
-            JOIN reference_group_counts rgc ON rlt.Entry = rgc.referenceID
-        ),
-        chances AS (
-        SELECT  rd.itemID AS itemID,
-                0         AS direct_chance,
-                (1.0 / rd.groupCount) * COALESCE(NULLIF(rd.referenceChance, 0), 1) AS reference_chance
-            FROM reference_data rd
-            JOIN item_template it ON it.entry = rd.itemID
-            WHERE it.class IN ({})
-            AND it.quality IN ({})
-        )
-         
-        SELECT  itemID,
-                0                     AS direct_chance,
-                MIN(reference_chance) AS reference_chance
-                FROM chances 
-                GROUP BY itemID
+        SELECT 0 AS itemID, 0 AS direct_chance, 0 AS reference_chance FROM item_template WHERE 1 = 0
     )SQL";
 
     std::string groupDropString = R"SQL(
-        WITH group_tables AS (
-            SELECT clt.Entry AS loot_entry, clt.GroupId AS group_id, clt.Chance AS chance, clt.Item AS item_id, it.`name` AS itemName, it.class AS itemClass, it.Quality AS itemQuality
-            FROM creature_loot_template clt
-            JOIN item_template it ON clt.Item = it.entry
-            WHERE clt.groupid != 0 AND clt.REFERENCE = 0
+        WITH group_counts AS (
+            SELECT entry, groupid, COUNT(*) AS item_count
+            FROM creature_loot_template
+            WHERE groupid != 0 AND mincountOrRef >= 0
+            GROUP BY entry, groupid
         )
-        SELECT item_id, 
-                0 AS direct_chance, 
-                CASE 
-                    WHEN chance = 0 THEN (1.0 / item_count) * (1 - POWER(1 - (1.0 / item_count), item_count)) * 100
-                    WHEN chance != 0 THEN ((1.0 / item_count) * (1 - POWER(1 - (1.0 / item_count), item_count)) * 100) * chance/100
-                END AS reference_chance
-            FROM (
-                SELECT group_tables.*, COUNT(*) OVER (PARTITION BY loot_entry, group_id) AS item_count
-                FROM group_tables
-            ) compute_item_count
-            WHERE itemClass IN ({}) AND itemQuality IN ({})
+        SELECT clt.item AS itemID,
+               0 AS direct_chance,
+               CASE
+                   WHEN ABS(clt.ChanceOrQuestChance) = 0 THEN (1.0 / gc.item_count) * (1 - POWER(1 - (1.0 / gc.item_count), gc.item_count)) * 100
+                   ELSE ((1.0 / gc.item_count) * (1 - POWER(1 - (1.0 / gc.item_count), gc.item_count)) * 100) * ABS(clt.ChanceOrQuestChance) / 100
+               END AS reference_chance
+        FROM creature_loot_template clt
+        JOIN group_counts gc ON clt.entry = gc.entry AND clt.groupid = gc.groupid
+        JOIN item_template it ON it.entry = clt.item
+        WHERE clt.groupid != 0
+          AND clt.mincountOrRef >= 0
+          AND it.class IN (%u)
+          AND it.quality IN (%s)
     )SQL";
 
     std::string objectsDropString = R"SQL(
-        SELECT it.entry    AS itemID,
-               ilt.Chance  AS direct_chance,
-               0		   AS reference_chance
-            FROM item_loot_template ilt
-            JOIN item_template it ON it.entry = ilt.Item
-            WHERE it.class IN ({}) AND it.quality IN ({}) AND chance != 0
-        UNION ALL 
-        SELECT it.entry    AS itemID,
-               golt.Chance AS direct_chance,
-               0		   AS reference_chance
-            FROM gameobject_loot_template golt
-            JOIN item_template it ON it.entry = golt.Item
-            WHERE it.class IN ({}) AND it.quality IN ({}) AND chance != 0
+        SELECT it.entry AS itemID,
+               ABS(ilt.ChanceOrQuestChance) AS direct_chance,
+               0 AS reference_chance
+        FROM item_loot_template ilt
+        JOIN item_template it ON it.entry = ilt.item
+        WHERE ilt.mincountOrRef >= 0
+          AND ilt.groupid = 0
+          AND ABS(ilt.ChanceOrQuestChance) != 0
+          AND it.class IN (%u)
+          AND it.quality IN (%s)
+        UNION ALL
+        SELECT it.entry AS itemID,
+               ABS(golt.ChanceOrQuestChance) AS direct_chance,
+               0 AS reference_chance
+        FROM gameobject_loot_template golt
+        JOIN item_template it ON it.entry = golt.item
+        WHERE golt.mincountOrRef >= 0
+          AND golt.groupid = 0
+          AND ABS(golt.ChanceOrQuestChance) != 0
+          AND it.class IN (%u)
+          AND it.quality IN (%s)
     )SQL";
 
-    QueryResult directResult = WorldDatabase.Query(directDropString, category, qualities);
-    QueryResult referenceResult = WorldDatabase.Query(referenceDropString, category, qualities);
-    QueryResult danglingReferenceResult = WorldDatabase.Query(danglingReferenceDropString, category, qualities);
-    QueryResult groupResult = WorldDatabase.Query(groupDropString, category, qualities);
-    QueryResult objectsDropResult = WorldDatabase.Query(objectsDropString,
-                                                        category, qualities,
-                                                        category, qualities);
+    QueryResult* directResult = WorldDatabase.PQuery(directDropString.c_str(), category, qualities.c_str());
+    QueryResult* referenceResult = WorldDatabase.PQuery(referenceDropString.c_str(), category, qualities.c_str());
+    QueryResult* danglingReferenceResult = WorldDatabase.PQuery(danglingReferenceDropString.c_str(), category, qualities.c_str());
+    QueryResult* groupResult = WorldDatabase.PQuery(groupDropString.c_str(), category, qualities.c_str());
+    QueryResult* objectsDropResult = WorldDatabase.PQuery(objectsDropString.c_str(),
+                                                        category, qualities.c_str(),
+                                                        category, qualities.c_str());
     if (!directResult || !referenceResult || !danglingReferenceResult || !groupResult || !objectsDropResult)
     {
-        LOG_ERROR("module", "AuctionHouseBot: PopulateItemDropChances() failed to query items' drop rates.");
+        sLog.outError("AuctionHouseBot: PopulateItemDropChances() failed to query items' drop rates.");
+        delete directResult;
+        delete referenceResult;
+        delete danglingReferenceResult;
+        delete groupResult;
+        delete objectsDropResult;
         return;
     }
 
-    // Add drop rate of all results to CachedItemDropRates 
-    auto parseResults = [this](QueryResult result, bool overwriteDropRate) 
+    // Add drop rate of all results to CachedItemDropRates
+    auto parseResults = [this](QueryResult* result, bool overwriteDropRate)
     {
         do {
             Field* fields = result->Fetch();
             double directDropChance = 0.0;
             double referenceDropChance = 0.0;
-            uint32 itemID = fields[0].Get<uint32>();
+            uint32 itemID = fields[0].GetUInt32();
 
             // Ignore quest rewards and crafted items, they have "100%" drop rate
             if (IsItemQuestReward(itemID) || IsItemCrafted(itemID))
                 continue;
 
-            if (CachedItemDropRates.contains(itemID) && !overwriteDropRate)
+            if (!overwriteDropRate && CachedItemDropRates.find(itemID) != CachedItemDropRates.end())
                 continue;
 
-            if (!fields[1].IsNull())
-                directDropChance = fields[1].Get<double>(); 
-            if (!fields[2].IsNull())
-                referenceDropChance = fields[2].Get<double>();
-            
+            if (!fields[1].IsNULL())
+                directDropChance = fields[1].GetFloat();
+            if (!fields[2].IsNULL())
+                referenceDropChance = fields[2].GetFloat();
+
             // Choose higher of two rates (one is normally 0), then raise to MinDropRate if less than
             double higherDropChance = (directDropChance > referenceDropChance) ? directDropChance : referenceDropChance;
             higherDropChance = (higherDropChance < AdvancedListingRuleUseDropRatesMinDropRate) ? AdvancedListingRuleUseDropRatesMinDropRate : higherDropChance;
 
-            if (CachedItemDropRates[itemID] < higherDropChance) 
+            auto it = CachedItemDropRates.find(itemID);
+            if (it == CachedItemDropRates.end() || it->second < higherDropChance)
                 CachedItemDropRates[itemID] = higherDropChance;
 
         } while (result->NextRow());
@@ -1507,23 +1536,30 @@ void AuctionHouseBot::PopulateItemDropChancesForCategoryAndQuality(ItemClass cat
     parseResults(groupResult, true);
     parseResults(objectsDropResult, true);
 
+    delete directResult;
+    delete referenceResult;
+    delete danglingReferenceResult;
+    delete groupResult;
+    delete objectsDropResult;
+
     // Populate drop rates Tiers
-    for (auto& [classID, qualityGroups] : ItemCandidatesByItemClassAndQuality)
+    for (auto& classQualityPair : ItemCandidatesByItemClassAndQuality)
     {
-        for (auto& [qualityID, candidates] : qualityGroups)
+        auto& qualityGroups = classQualityPair.second;
+        for (auto& qualityCandidatesPair : qualityGroups)
         {
+            auto& candidates = qualityCandidatesPair.second;
             for (uint32 id : candidates)
             {
-                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(id);
+                ItemPrototype const* proto = sObjectMgr.GetItemPrototype(id);
                 if (!proto || !IsItemCategoryQualityInDBDropRatesConfig(proto))
                     continue;
 
                 // Custom items missing from Item.dbc skip the core's class/quality validation, so bounds check
                 if (proto->Class >= ItemTiersByClassAndQuality.size() || proto->Quality >= ItemTiersByClassAndQuality[proto->Class].size())
                     continue;
-
                 // Skip items that haven't been populated yet.
-                if (!CachedItemDropRates.contains(id))
+                if (CachedItemDropRates.find(id) == CachedItemDropRates.end())
                     continue;
 
                 double rate = CachedItemDropRates[id];
@@ -1546,8 +1582,8 @@ void AuctionHouseBot::InitializeAdvancedListingRuleUseDropRatesTiers()
 {
     // Re-initialize to reset
     DropRatesToTierMap = std::map<double, int, std::greater<double>>();
-    ItemTiersByClassAndQuality = std::vector<std::vector<std::vector<std::vector<uint32>>>>(17); // 17 Categories
-    std::string tiersConfigString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig", "50,10,5,2,1,0.5,0.2,0.1,0.05,0.02,0.01,0.005");
+    ItemTiersByClassAndQuality = std::vector<std::vector<std::vector<std::vector<uint32>>>>(MAX_ITEM_CLASS);
+    std::string tiersConfigString = GetConfigString("AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig", "50,10,5,2,1,0.5,0.2,0.1,0.05,0.02,0.01,0.005");
 
     // Parse tiers config, populate DropRate -> Tier map for later lookups
     int curTier = 0;
@@ -1556,27 +1592,26 @@ void AuctionHouseBot::InitializeAdvancedListingRuleUseDropRatesTiers()
     tiersConfigStream.str(tiersConfigString);
     while (std::getline(tiersConfigStream, delimitedValue, ',')) // Process each tier in the string, delimited by the comma ","
     {
-        // Trim whitespace
         delimitedValue.erase(0, delimitedValue.find_first_not_of(" \t"));
         delimitedValue.erase(delimitedValue.find_last_not_of(" \t") + 1);
 
         if (delimitedValue.empty())
         {
-            LOG_ERROR("module", "AuctionHouseBot: Empty entry found in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '{}'", tiersConfigString);
+            sLog.outError("AuctionHouseBot: Empty entry found in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '%s'", tiersConfigString.c_str());
             continue;
         }
 
         double rate = std::stod(delimitedValue);
         if (rate <= 0.0)
         {
-            LOG_ERROR("module", "AuctionHouseBot: Invalid (non-positive) drop rate '{}' in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '{}'", delimitedValue, tiersConfigString);
+            sLog.outError("AuctionHouseBot: Invalid (non-positive) drop rate '%s' in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '%s'", delimitedValue.c_str(), tiersConfigString.c_str());
             continue;
         }
 
         // Check for duplicates
-        if (DropRatesToTierMap.contains(rate))
+        if (DropRatesToTierMap.find(rate) != DropRatesToTierMap.end())
         {
-            LOG_ERROR("module", "AuctionHouseBot: Duplicate drop rate '{}' found in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '{}'", rate, tiersConfigString);
+            sLog.outError("AuctionHouseBot: Duplicate drop rate '%f' found in AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '%s'", rate, tiersConfigString.c_str());
             continue;
         }
 
@@ -1585,12 +1620,12 @@ void AuctionHouseBot::InitializeAdvancedListingRuleUseDropRatesTiers()
     }
 
     if (DropRatesToTierMap.empty())
-        LOG_ERROR("module", "AuctionHouseBot: Failed to parse any valid drop rates from AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '{}'", tiersConfigString);
+        sLog.outError("AuctionHouseBot: Failed to parse any valid drop rates from AuctionHouseBot.AdvancedListingRules.UseDropRates.TiersConfig: '%s'", tiersConfigString.c_str());
 
     // Resize ItemTiersByClassAndQuality by tier count
     for (auto& qualities : ItemTiersByClassAndQuality)
     {
-        qualities.resize(7);    // 7 Qualities
+        qualities.resize(MAX_ITEM_QUALITY);
         for (auto& tiers : qualities)
             tiers.resize(DropRatesToTierMap.size() + 1); // Create an extra "catch-all" bucket
     }
@@ -1601,36 +1636,38 @@ void AuctionHouseBot::PopulateQuestRewardItemIDs()
     string questRewardsString = R"SQL(
         SELECT DISTINCT item_id
             FROM (
-                SELECT RewardItem1 AS item_id FROM quest_template UNION ALL
-                SELECT RewardItem2 AS item_id FROM quest_template UNION ALL
-                SELECT RewardItem3 AS item_id FROM quest_template UNION ALL
-                SELECT RewardItem4 AS item_id FROM quest_template UNION ALL
-                SELECT ItemDrop1 AS item_id FROM quest_template UNION ALL
-                SELECT ItemDrop2 AS item_id FROM quest_template UNION ALL
-                SELECT ItemDrop3 AS item_id FROM quest_template UNION ALL
-                SELECT ItemDrop4 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID1 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID2 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID3 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID4 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID5 AS item_id FROM quest_template UNION ALL
-                SELECT RewardChoiceItemID6 AS item_id FROM quest_template
+                SELECT RewItemId1 AS item_id FROM quest_template UNION ALL
+                SELECT RewItemId2 AS item_id FROM quest_template UNION ALL
+                SELECT RewItemId3 AS item_id FROM quest_template UNION ALL
+                SELECT RewItemId4 AS item_id FROM quest_template UNION ALL
+                SELECT ReqItemId1 AS item_id FROM quest_template UNION ALL
+                SELECT ReqItemId2 AS item_id FROM quest_template UNION ALL
+                SELECT ReqItemId3 AS item_id FROM quest_template UNION ALL
+                SELECT ReqItemId4 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId1 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId2 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId3 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId4 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId5 AS item_id FROM quest_template UNION ALL
+                SELECT RewChoiceItemId6 AS item_id FROM quest_template
             ) AS quest_rewards
             WHERE item_id != 0
     )SQL";
 
-    QueryResult questRewardsResult = WorldDatabase.Query(questRewardsString);
+    QueryResult* questRewardsResult = WorldDatabase.Query(questRewardsString.c_str());
     if (!questRewardsResult)
     {
-        LOG_ERROR("module", "AuctionHouseBot: Quest Rewards lookup failed.");
+        sLog.outError("AuctionHouseBot: Quest Rewards lookup failed.");
         return;
     }
 
-    do 
+    do
     {
-        uint32 id = questRewardsResult->Fetch()->Get<uint32>();
+        uint32 id = questRewardsResult->Fetch()->GetUInt32();
         QuestRewardItemIDs.insert(id);
     } while (questRewardsResult->NextRow());
+
+    delete questRewardsResult;
 }
 
 int AuctionHouseBot::GetItemDropChanceTier(double dropRate)
@@ -1639,7 +1676,7 @@ int AuctionHouseBot::GetItemDropChanceTier(double dropRate)
     {
         double mapDropRate = pair.first;
         int mapTier = pair.second;
-        if (dropRate >= mapDropRate) 
+        if (dropRate >= mapDropRate)
             return mapTier;
     }
 
@@ -1652,31 +1689,44 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
     if (!BuyingBotEnabled)
     {
         if (debug_Out)
-            LOG_INFO("module", "AHBuyer: Disabled");
+            sLog.outString("AHBuyer: Disabled");
         return;
     }
 
+    AuctionHouseEntry const* ahEntry = sAuctionMgr.GetAuctionHouseEntry(config->GetAHFID());
+    if (!ahEntry)
+        return;
+
+    // Fetches content of selected AH
+    AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(ahEntry);
+    if (!auctionHouse)
+        return;
+
     // Pull currentAuctionItemListCount.
-    string queryString = "SELECT id FROM auctionhouse WHERE itemowner NOT IN ({}) AND buyguid NOT IN ({})";
+    std::string queryString = "SELECT id FROM auction WHERE itemowner NOT IN (%s) AND buyguid NOT IN (%s)";
+
     if (BuyingBotWillBidAgainstPlayers == false)
-        queryString = "SELECT id FROM auctionhouse WHERE itemowner NOT IN ({}) AND buyguid NOT IN ({}) AND lastbid = 0";
-    QueryResult result = CharacterDatabase.Query(queryString, AHCharactersGUIDsForQuery, AHCharactersGUIDsForQuery);
+        queryString = "SELECT id FROM auction WHERE itemowner NOT IN (%s) AND buyguid NOT IN (%s) AND lastbid = 0";
+    QueryResult* result = CharacterDatabase.PQuery(queryString.c_str(), AHCharactersGUIDsForQuery.c_str(), AHCharactersGUIDsForQuery.c_str());
 
     if (!result)
         return;
 
     if (result->GetRowCount() == 0)
+    {
+        delete result;
         return;
+    }
 
-    // Fetches content of selected AH
-    AuctionHouseObject* auctionHouse =  sAuctionMgr->GetAuctionsMap(config->GetAHFID());
     vector<uint32> possibleBids;
 
     do
     {
-        uint32 tmpdata = result->Fetch()->Get<uint32>();
+        uint32 tmpdata = result->Fetch()->GetUInt32();
         possibleBids.push_back(tmpdata);
     } while (result->NextRow());
+
+    delete result;
 
     int randBuyingBotBuyCandidatesPerBuyCycle = urand(BuyingBotBuyCandidatesPerBuyCycleMin, BuyingBotBuyCandidatesPerBuyCycleMax);
     for (int count = 1; count <= randBuyingBotBuyCandidatesPerBuyCycle; ++count)
@@ -1704,20 +1754,20 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
             continue;
 
         // get exact item information
-		Item *pItem = sAuctionMgr->GetAItem(auction->item_guid);
+        Item *pItem = sAuctionMgr.GetAItem(auction->itemGuidLow);
         if (!pItem || pItem->GetCount() == 0)
         {
-			if (debug_Out)
-                LOG_ERROR("module", "AHBuyer: Item {} doesn't exist, perhaps bought already?", auction->item_guid.ToString());
+            if (debug_Out)
+                sLog.outError("AHBuyer: Item %u doesn't exist, perhaps bought already?", auction->itemGuidLow);
             continue;
         }
 
         // get item prototype
-        ItemTemplate const* prototype = sObjectMgr->GetItemTemplate(auction->item_template);
+        ItemPrototype const* prototype = sObjectMgr.GetItemPrototype(auction->itemTemplate);
         if (!prototype)
         {
             if (debug_Out)
-                LOG_ERROR("module", "AHBuyer: Item template {} for auction {} does not exist, skipping", auction->item_template, auction->Id);
+                sLog.outError("AHBuyer: Item template %u for auction %u does not exist, skipping", auction->itemTemplate, auction->Id);
             continue;
         }
 
@@ -1775,77 +1825,89 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
 
         if (debug_Out)
         {
-            LOG_INFO("module", "-------------------------------------------------");
-            LOG_INFO("module", "AHBuyer: Info for Auction #{}:", auction->Id);
-            LOG_INFO("module", "AHBuyer: AuctionHouse: {}", auction->GetHouseId());
-            LOG_INFO("module", "AHBuyer: Owner: {}", auction->owner.ToString());
-            LOG_INFO("module", "AHBuyer: Bidder: {}", auction->bidder.ToString());
-            LOG_INFO("module", "AHBuyer: Expire Time: {}", uint32(auction->expire_time));
-            LOG_INFO("module", "AHBuyer: Item GUID: {}", auction->item_guid.ToString());
-            LOG_INFO("module", "AHBuyer: Item Template: {}", auction->item_template);
-            LOG_INFO("module", "AHBuyer: Item Info:");
-            LOG_INFO("module", "AHBuyer: Item ID: {}", prototype->ItemId);
-            LOG_INFO("module", "AHBuyer: Vendor Buy Price: {}", prototype->BuyPrice);
-            LOG_INFO("module", "AHBuyer: Vendor Sell Price (Base): {}", prototype->SellPrice);
+            sLog.outString("-------------------------------------------------");
+            sLog.outString("AHBuyer: Info for Auction #%u:", auction->Id);
+            sLog.outString("AHBuyer: AuctionHouse: %u", auction->GetHouseId());
+            sLog.outString("AHBuyer: Owner: %u", auction->owner);
+            sLog.outString("AHBuyer: Bidder: %u", auction->bidder);
+            sLog.outString("AHBuyer: Expire Time: %u", uint32(auction->expireTime));
+            sLog.outString("AHBuyer: Item GUID: %u", auction->itemGuidLow);
+            sLog.outString("AHBuyer: Item Template: %u", auction->itemTemplate);
+            sLog.outString("AHBuyer: Item Info:");
+            sLog.outString("AHBuyer: Item ID: %u", prototype->ItemId);
+            sLog.outString("AHBuyer: Vendor Buy Price: %u", prototype->BuyPrice);
+            sLog.outString("AHBuyer: Vendor Sell Price (Base): %u", prototype->SellPrice);
             if (PreventOverpayingForVendorItems == true)
-                LOG_INFO("module", "AHBuyer: Vender Sell Price (Vendor): {}", vendorSellPrice);
-            LOG_INFO("module", "AHBuyer: Deposit: {}", auction->deposit);
-            LOG_INFO("module", "AHBuyer: Bonding: {}", prototype->Bonding);
-            LOG_INFO("module", "AHBuyer: Quality: {}", prototype->Quality);
-            LOG_INFO("module", "AHBuyer: Item Level: {}", prototype->ItemLevel);
-            LOG_INFO("module", "AHBuyer: Ammo Type: {}", prototype->AmmoType);
-            LOG_INFO("module", "AHBuyer: Stack Size: {}", pItem->GetCount());
-            LOG_INFO("module", "AHBuyer: Starting Bid: {}", auction->startbid);
-            LOG_INFO("module", "AHBuyer: Current Bid: {}", auction->bid);
-            LOG_INFO("module", "AHBuyer: Buyout Price: {}", auction->buyout);
-            LOG_INFO("module", "AHBuyer: Willing To Pay Per Item Price (Buyout): {}", willingToSpendPerItemPrice);
-            LOG_INFO("module", "AHBuyer: Willing To Pay For Stack Price (Buyout): {}", willingToPayForStackPrice);
-            LOG_INFO("module", "AHBuyer: Calculated Bid Amount (0 means too expensive to bid): {}", calcBidAmount);
-            LOG_INFO("module", "AHBuyer: Decided to Buyout?: {}", doBuyout);
-            LOG_INFO("module", "AHBuyer: Decided to Bid?: {}", doBid);
-            LOG_INFO("module", "AHBuyer: Stopped from buying due to 'PreventOverpayingForVendorItems'?: {}", preventedOverpayingForVendorItem);
-            LOG_INFO("module", "-------------------------------------------------");
+                sLog.outString("AHBuyer: Vender Sell Price (Vendor): %u", vendorSellPrice);
+            sLog.outString("AHBuyer: Deposit: %u", auction->deposit);
+            sLog.outString("AHBuyer: Bonding: %u", prototype->Bonding);
+            sLog.outString("AHBuyer: Quality: %u", prototype->Quality);
+            sLog.outString("AHBuyer: Item Level: %u", prototype->ItemLevel);
+            sLog.outString("AHBuyer: Ammo Type: %u", prototype->AmmoType);
+            sLog.outString("AHBuyer: Stack Size: %u", pItem->GetCount());
+            sLog.outString("AHBuyer: Starting Bid: %u", auction->startbid);
+            sLog.outString("AHBuyer: Current Bid: %u", auction->bid);
+            sLog.outString("AHBuyer: Buyout Price: %u", auction->buyout);
+            sLog.outString("AHBuyer: Willing To Pay Per Item Price (Buyout): %u", willingToSpendPerItemPrice);
+            sLog.outString("AHBuyer: Willing To Pay For Stack Price (Buyout): %u", willingToPayForStackPrice);
+            sLog.outString("AHBuyer: Calculated Bid Amount (0 means too expensive to bid): %u", calcBidAmount);
+            sLog.outString("AHBuyer: Decided to Buyout?: %s", doBuyout ? "true" : "false");
+            sLog.outString("AHBuyer: Decided to Bid?: %s", doBid ? "true" : "false");
+            sLog.outString("AHBuyer: Stopped from buying due to 'PreventOverpayingForVendorItems'?: %s", preventedOverpayingForVendorItem ? "true" : "false");
+            sLog.outString("-------------------------------------------------");
         }
 
         Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
 
         if (doBid)
         {
-            auto trans = CharacterDatabase.BeginTransaction();
+            if (auction->bidder && auction->bidder != AHBplayer->GetGUIDLow())
+            {
+                ObjectGuid oldBidderGuid = ObjectGuid(HIGHGUID_PLAYER, auction->bidder);
+                if (Player* oldBidder = sObjectMgr.GetPlayer(oldBidderGuid))
+                {
+                    std::ostringstream subject;
+                    subject << auction->itemTemplate << ":0:" << AUCTION_OUTBIDDED;
+                    MailDraft(subject.str())
+                        .SetMoney(auction->bid)
+                        .SendMailTo(MailReceiver(oldBidder, oldBidderGuid), auction, MAIL_CHECK_MASK_COPIED);
+                }
+            }
 
-            if (auction->bidder)
-                sAuctionMgr->SendAuctionOutbiddedMail(auction, calcBidAmount, AHBplayer, trans);
+            auction->bidder = AHBplayer->GetGUIDLow();
+            auction->bid = static_cast<uint32>(calcBidAmount);
 
-            auction->bidder = AHBplayer->GetGUID();
-            auction->bid = calcBidAmount;
-
-            sAuctionMgr->GetAuctionHouseSearcher()->UpdateBid(auction);
-
-            CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_AUCTION_BID);
-            stmt->SetData(0, auction->bidder.GetCounter());
-            stmt->SetData(1, auction->bid);
-            stmt->SetData(2, auction->Id);
-            trans->Append(stmt);
-
-            CharacterDatabase.CommitTransaction(trans);
+            CharacterDatabase.PExecute("UPDATE auction SET buyguid = '%u', lastbid = '%u' WHERE id = '%u'",
+                auction->bidder, auction->bid, auction->Id);
         }
         else if (doBuyout)
         {
-            auto trans = CharacterDatabase.BeginTransaction();
+            if (auction->bidder && auction->bidder != AHBplayer->GetGUIDLow())
+            {
+                ObjectGuid oldBidderGuid = ObjectGuid(HIGHGUID_PLAYER, auction->bidder);
+                if (Player* oldBidder = sObjectMgr.GetPlayer(oldBidderGuid))
+                {
+                    std::ostringstream subject;
+                    subject << auction->itemTemplate << ":0:" << AUCTION_OUTBIDDED;
+                    MailDraft(subject.str())
+                        .SetMoney(auction->bid)
+                        .SendMailTo(MailReceiver(oldBidder, oldBidderGuid), auction, MAIL_CHECK_MASK_COPIED);
+                }
+            }
 
-            if ((auction->bidder) && (AHBplayer->GetGUID() != auction->bidder))
-                sAuctionMgr->SendAuctionOutbiddedMail(auction, auction->buyout, AHBplayer, trans);
-            auction->bidder = AHBplayer->GetGUID();
+            auction->bidder = AHBplayer->GetGUIDLow();
             auction->bid = auction->buyout;
 
+            CharacterDatabase.PExecute("UPDATE auction SET buyguid = '%u', lastbid = '%u' WHERE id = '%u'",
+                auction->bidder, auction->bid, auction->Id);
             // Send mails to buyer & seller
-            sAuctionMgr->SendAuctionSuccessfulMail(auction, trans);
-            sAuctionMgr->SendAuctionWonMail(auction, trans);
-            auction->DeleteFromDB(trans);
+            sAuctionMgr.SendAuctionSuccessfulMail(auction);
+            sAuctionMgr.SendAuctionWonMail(auction);
+            auction->DeleteFromDB();
 
-            sAuctionMgr->RemoveAItem(auction->item_guid);
+            sAuctionMgr.RemoveAItem(auction->itemGuidLow);
             auctionHouse->RemoveAuction(auction);
-            CharacterDatabase.CommitTransaction(trans);
+            delete auction;
         }
     }
 }
@@ -1853,10 +1915,16 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
 void AuctionHouseBot::Update()
 {
     if (AHCharacters.empty() == true)
+    {
+        sLog.outError("AuctionHouseBot: Update() aborted - no bot characters configured");
         return;
+    }
 
     if ((SellingBotEnabled == false) && (BuyingBotEnabled == false))
+    {
+        sLog.outError("AuctionHouseBot: Update() aborted - seller and buyer are both disabled");
         return;
+    }
 
     LastBuyCycleCount++;
     LastSellCycleCount++;
@@ -1877,13 +1945,19 @@ void AuctionHouseBot::Update()
         CyclesBetweenSellAction = urand(CyclesBetweenSellActionMin, CyclesBetweenSellActionMax);
         sellReady = true;
     }
-    
+
     // Only update if a Buy or Sell update cycle has been hit
     if (!buyReady && !sellReady)
         return;
-    
+
+    if (MailCleanupEnabled && (time(NULL) - LastMailCleanupTime) >= (time_t)(MailCleanupIntervalMinutes * 60))
+    {
+        CleanupBotMail();
+        LastMailCleanupTime = time(NULL);
+    }
+
     // Load all AH Bot Players
-    std::vector<std::pair<std::unique_ptr<Player>, std::unique_ptr<WorldSession>>> AHBPlayers;
+    std::vector<std::pair<Player*, WorldSession*>> AHBPlayers;
     AHBPlayers.reserve(AHCharacters.size());
     for (uint32 botIndex = 0; botIndex < AHCharacters.size(); ++botIndex)
     {
@@ -1891,26 +1965,24 @@ void AuctionHouseBot::Update()
         std::string accountName = "AuctionHouseBot" + std::to_string(AHCharacters[botIndex].AccountID);
 
         // Wrap session and player in unique pointer to manage lifetime
-        auto session = std::make_unique<WorldSession>(
-            AHCharacters[botIndex].AccountID, std::move(accountName), 0, nullptr,
-            SEC_PLAYER, sWorld->getIntConfig(CONFIG_EXPANSION), 0, LOCALE_enUS, 0, false, false, 0
+        WorldSession* session = new WorldSession(
+            AHCharacters[botIndex].AccountID, nullptr, SEC_PLAYER, 0, LOCALE_enUS, accountName, 0, SessionTransport::Network
         );
-        auto player = std::make_unique<Player>(session.get());
+        Player* player = new Player(session);
         player->Initialize(AHCharacters[botIndex].CharacterGUID);
-        ObjectAccessor::AddObject(player.get());
-        AHBPlayers.emplace_back(std::move(player), std::move(session));
+        sObjectAccessor.AddObject(player);
+        AHBPlayers.emplace_back(player, session);
     }
 
     // Create a vector of Player* for passing to methods
     std::vector<Player*> playersPointerVector;
     playersPointerVector.reserve(AHBPlayers.size());
     for (const auto& pair : AHBPlayers)
-        playersPointerVector.emplace_back(pair.first.get());
+        playersPointerVector.emplace_back(pair.first);
 
-     // List New Auctions
-     if (sellReady) 
+     if (sellReady)
      {
-         if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
+         if (sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
          {
              AddNewAuctions(playersPointerVector, &AllianceConfig);
              AddNewAuctions(playersPointerVector, &HordeConfig);
@@ -1919,9 +1991,9 @@ void AuctionHouseBot::Update()
      }
 
      // Place New Bids
-     if (buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0) 
+     if (buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0)
      {
-         if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
+         if (sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
          {
              AddNewAuctionBuyerBotBid(playersPointerVector, &AllianceConfig);
              AddNewAuctionBuyerBotBid(playersPointerVector, &HordeConfig);
@@ -1930,20 +2002,26 @@ void AuctionHouseBot::Update()
      }
 
     // Remove AH Bot Players from world
-    for (auto& [player, session] : AHBPlayers)
-        ObjectAccessor::RemoveObject(player.get());
+    for (auto& pair : AHBPlayers)
+    {
+        Player* player = pair.first;
+        WorldSession* session = pair.second;
+        sObjectAccessor.RemoveObject(player);
+        delete player;
+        delete session;
+    }
 }
 
 bool AuctionHouseBot::IsModuleEnabled()
 {
-    bool sellerEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.EnableSeller", false);
-    bool buyerEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.Enabled", false);
+    bool sellerEnabled = GetConfigBool("AuctionHouseBot.EnableSeller", false);
+    bool buyerEnabled = GetConfigBool("AuctionHouseBot.Buyer.Enabled", false);
     if (sellerEnabled == false && buyerEnabled == false)
         return false;
-    string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
+    std::string charString = GetConfigString("AuctionHouseBot.GUIDs", "0");
     if (charString == "0" || charString.empty())
     {
-        LOG_INFO("module", "AuctionHouseBot: AuctionHouseBot.GUIDs is not configured so this module will be disabled");
+        sLog.outString("AuctionHouseBot: AuctionHouseBot.GUIDs is not configured so this module will be disabled");
         return false;
     }
     return true;
@@ -1951,73 +2029,76 @@ bool AuctionHouseBot::IsModuleEnabled()
 
 void AuctionHouseBot::InitializeConfiguration()
 {
-    debug_Out = sConfigMgr->GetOption<bool>("AuctionHouseBot.DEBUG", false);
-    debug_Out_Filters = sConfigMgr->GetOption<bool>("AuctionHouseBot.DEBUG_FILTERS", false);
+    debug_Out = GetConfigBool("AuctionHouseBot.DEBUG", false);
+    debug_Out_Filters = GetConfigBool("AuctionHouseBot.DEBUG_FILTERS", false);
 
-    SellingBotEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.EnableSeller", false);
-    BuyingBotEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.Enabled", false);
+    SellingBotEnabled = GetConfigBool("AuctionHouseBot.EnableSeller", false);
+    BuyingBotEnabled = GetConfigBool("AuctionHouseBot.Buyer.Enabled", false);
 
-    string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
+    std::string charString = GetConfigString("AuctionHouseBot.GUIDs", "0");
     AddCharacters(charString);
 
     // Top level overrides
-    CompleteItemValueOverrideEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.CompleteItemValueOverride.Enabled", false);
-    AddItemValuePairsToItemIDMap(CompleteItemValueOverrideItemListByItemID, sConfigMgr->GetOption<std::string>("AuctionHouseBot.CompleteItemValueOverride.Items", ""));
-    CompleteItemValueOverrideDoApplyBidVariations = sConfigMgr->GetOption<bool>("AuctionHouseBot.CompleteItemValueOverride.DoApplyBidVariations", false);
-    CompleteItemValueOverrideDoApplyBuyoutVariations = sConfigMgr->GetOption<bool>("AuctionHouseBot.CompleteItemValueOverride.DoApplyBuyoutVariations", false);
+    CompleteItemValueOverrideEnabled = GetConfigBool("AuctionHouseBot.CompleteItemValueOverride.Enabled", false);
+    AddItemValuePairsToItemIDMap(CompleteItemValueOverrideItemListByItemID, GetConfigString("AuctionHouseBot.CompleteItemValueOverride.Items", ""));
+    CompleteItemValueOverrideDoApplyBidVariations = GetConfigBool("AuctionHouseBot.CompleteItemValueOverride.DoApplyBidVariations", false);
+    CompleteItemValueOverrideDoApplyBuyoutVariations = GetConfigBool("AuctionHouseBot.CompleteItemValueOverride.DoApplyBuyoutVariations", false);
 
     // Buyer & Seller core properties
     SetCyclesBetweenBuyOrSell();
-    ReturnExpiredAuctionItemsToBot = sConfigMgr->GetOption<bool>("AuctionHouseBot.ReturnExpiredAuctionItemsToBot", false);
-    ItemsPerCycle = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ItemsPerCycle", 75);
-    AdvancedListingRuleUseDropRatesEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false);
-    AdvancedListingRuleUseDropRatesWeaponEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Weapon", true);
-    AdvancedListingRuleUseDropRatesArmorEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Armor", true);
-    AdvancedListingRuleUseDropRatesRecipeEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Recipe", true);
-    AdvancedListingRuleUseDropRatesMinDropRate = sConfigMgr->GetOption<float>("AuctionHouseBot.AdvancedListingRules.UseDropRates.MinDropRate", 0.005);
-    if (AdvancedListingRuleUseDropRatesMinDropRate < 0 || AdvancedListingRuleUseDropRatesMinDropRate > 100) AdvancedListingRuleUseDropRatesMinDropRate = 0.005;
+    ReturnExpiredAuctionItemsToBot = GetConfigBool("AuctionHouseBot.ReturnExpiredAuctionItemsToBot", false);
+    ItemsPerCycle = GetConfigUInt("AuctionHouseBot.ItemsPerCycle", 75);
+    AdvancedListingRuleUseDropRatesEnabled = GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false);
+    AdvancedListingRuleUseDropRatesWeaponEnabled = GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Weapon", true);
+    AdvancedListingRuleUseDropRatesArmorEnabled = GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Armor", true);
+    AdvancedListingRuleUseDropRatesRecipeEnabled = GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Recipe", true);
+    AdvancedListingRuleUseDropRatesMinDropRate = GetConfigFloat("AuctionHouseBot.AdvancedListingRules.UseDropRates.MinDropRate", 0.005f);
+    if (AdvancedListingRuleUseDropRatesMinDropRate < 0 || AdvancedListingRuleUseDropRatesMinDropRate > 100) AdvancedListingRuleUseDropRatesMinDropRate = 0.005f;
     AdvancedListingRuleUseDropRatesWeaponAffectedQualities.clear();
     AdvancedListingRuleUseDropRatesArmorAffectedQualities.clear();
     AdvancedListingRuleUseDropRatesRecipeAffectedQualities.clear();
-    ParseNumberListToSet(AdvancedListingRuleUseDropRatesWeaponAffectedQualities, sConfigMgr->GetOption<std::string>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Weapon.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Weapon.AffectedQualities");
-    ParseNumberListToSet(AdvancedListingRuleUseDropRatesArmorAffectedQualities, sConfigMgr->GetOption<std::string>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Armor.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Armor.AffectedQualities");
-    ParseNumberListToSet(AdvancedListingRuleUseDropRatesRecipeAffectedQualities, sConfigMgr->GetOption<std::string>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Recipe.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Recipe.AffectedQualities");
+    ParseNumberListToSet(AdvancedListingRuleUseDropRatesWeaponAffectedQualities, GetConfigString("AuctionHouseBot.AdvancedListingRules.UseDropRates.Weapon.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Weapon.AffectedQualities");
+    ParseNumberListToSet(AdvancedListingRuleUseDropRatesArmorAffectedQualities, GetConfigString("AuctionHouseBot.AdvancedListingRules.UseDropRates.Armor.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Armor.AffectedQualities");
+    ParseNumberListToSet(AdvancedListingRuleUseDropRatesRecipeAffectedQualities, GetConfigString("AuctionHouseBot.AdvancedListingRules.UseDropRates.Recipe.AffectedQualities", "2,3,4,5"), "AdvancedListingRules.UseDropRates.Recipe.AffectedQualities");
     AdvancedListingRuleUseDropRatesExceptionItems.clear();
-    ParseNumberListToSet(AdvancedListingRuleUseDropRatesExceptionItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.AdvancedListingRules.UseDropRates.DisabledItemIDs", ""), "AdvancedListingRules.UseDropRates.DisabledItemIDs");
-    MaxBuyoutPriceInCopper = sConfigMgr->GetOption<uint32>("AuctionHouseBot.MaxBuyoutPriceInCopper", 1000000000);
-    BuyoutVariationReducePercent = sConfigMgr->GetOption<float>("AuctionHouseBot.BuyoutVariationReducePercent", 0.15f);
-    BuyoutVariationAddPercent = sConfigMgr->GetOption<float>("AuctionHouseBot.BuyoutVariationAddPercent", 0.25f);
-    BidVariationHighReducePercent = sConfigMgr->GetOption<float>("AuctionHouseBot.BidVariationHighReducePercent", 0);
-    BidVariationLowReducePercent = sConfigMgr->GetOption<float>("AuctionHouseBot.BidVariationLowReducePercent", 0.25f);
-    BuyoutBelowVendorVariationAddPercentEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.BuyoutBelowVendorVariationAddPercentEnabled", true);
-    BuyoutBelowVendorVariationAddPercent = sConfigMgr->GetOption<float>("AuctionHouseBot.BuyoutBelowVendorVariationAddPercent", 0.25f);
-    ListingExpireTimeInSecondsMin = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingExpireTimeInSecondsMin", 900);
+    ParseNumberListToSet(AdvancedListingRuleUseDropRatesExceptionItems, GetConfigString("AuctionHouseBot.AdvancedListingRules.UseDropRates.DisabledItemIDs", ""), "AdvancedListingRules.UseDropRates.DisabledItemIDs");
+    MaxBuyoutPriceInCopper = GetConfigUInt("AuctionHouseBot.MaxBuyoutPriceInCopper", 1000000000);
+    BuyoutVariationReducePercent = GetConfigFloat("AuctionHouseBot.BuyoutVariationReducePercent", 0.15f);
+    BuyoutVariationAddPercent = GetConfigFloat("AuctionHouseBot.BuyoutVariationAddPercent", 0.25f);
+    BidVariationHighReducePercent = GetConfigFloat("AuctionHouseBot.BidVariationHighReducePercent", 0);
+    BidVariationLowReducePercent = GetConfigFloat("AuctionHouseBot.BidVariationLowReducePercent", 0.25f);
+    BuyoutBelowVendorVariationAddPercentEnabled = GetConfigBool("AuctionHouseBot.BuyoutBelowVendorVariationAddPercentEnabled", true);
+    BuyoutBelowVendorVariationAddPercent = GetConfigFloat("AuctionHouseBot.BuyoutBelowVendorVariationAddPercent", 0.25f);
+    ListingExpireTimeInSecondsMin = GetConfigUInt("AuctionHouseBot.ListingExpireTimeInSecondsMin", 900);
     if (ListingExpireTimeInSecondsMin < 900)
     {
-        LOG_ERROR("module", "AuctionHouseBot: ListingExpireTimeInSecondsMin was set below 900 (15 min), so setting to 900");
+        sLog.outError("AuctionHouseBot: ListingExpireTimeInSecondsMin was set below 900 (15 min), so setting to 900");
         ListingExpireTimeInSecondsMin = 900;
     }
-    ListingExpireTimeInSecondsMax = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingExpireTimeInSecondsMax", 86400);
+    ListingExpireTimeInSecondsMax = GetConfigUInt("AuctionHouseBot.ListingExpireTimeInSecondsMax", 86400);
     if (ListingExpireTimeInSecondsMax > 172800)
     {
-        LOG_ERROR("module", "AuctionHouseBot: ListingExpireTimeInSecondsMax was set above 172800 (48 hours), so setting to 172800");
+        sLog.outError("AuctionHouseBot: ListingExpireTimeInSecondsMax was set above 172800 (48 hours), so setting to 172800");
         ListingExpireTimeInSecondsMax = 172800;
     }
     if (ListingExpireTimeInSecondsMax < ListingExpireTimeInSecondsMin)
     {
-        LOG_ERROR("module", "AuctionHouseBot: ListingExpireTimeInSecondsMax was smaller than ListingExpireTimeInSecondsMin, setting to 172800 (48 hours) and 900 (15 min)");
+        sLog.outError("AuctionHouseBot: ListingExpireTimeInSecondsMax was smaller than ListingExpireTimeInSecondsMin, setting to 172800 (48 hours) and 900 (15 min)");
         ListingExpireTimeInSecondsMin = 900;
         ListingExpireTimeInSecondsMax = 172800;
     }
 
     // Buyer Bot
     SetBuyingBotBuyCandidatesPerBuyCycle();
-    BuyingBotAcceptablePriceModifier = sConfigMgr->GetOption<float>("AuctionHouseBot.Buyer.AcceptablePriceModifier", 1);
-    BuyingBotAlwaysBidMaxCalculatedPrice = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.AlwaysBidMaxCalculatedPrice", false);
-    PreventOverpayingForVendorItems = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.PreventOverpayingForVendorItems", true);
+    BuyingBotAcceptablePriceModifier = GetConfigFloat("AuctionHouseBot.Buyer.AcceptablePriceModifier", 1);
+    BuyingBotAlwaysBidMaxCalculatedPrice = GetConfigBool("AuctionHouseBot.Buyer.AlwaysBidMaxCalculatedPrice", false);
+    PreventOverpayingForVendorItems = GetConfigBool("AuctionHouseBot.Buyer.PreventOverpayingForVendorItems", true);
     if (PreventOverpayingForVendorItems)
         PopulateVendorItemsPrices();
-    BuyingBotWillBidAgainstPlayers = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.BidAgainstPlayers", false);
+    BuyingBotWillBidAgainstPlayers = GetConfigBool("AuctionHouseBot.Buyer.BidAgainstPlayers", false);
+
+    MailCleanupEnabled = GetConfigBool("AuctionHouseBot.MailCleanup.Enabled", true);
+    MailCleanupIntervalMinutes = GetConfigUInt("AuctionHouseBot.MailCleanup.IntervalMinutes", 5);
 
     // Stack Ratios
     RandomStackRatioConsumable = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Consumable", 50);
@@ -2034,7 +2115,6 @@ void AuctionHouseBot::InitializeConfiguration()
     RandomStackRatioQuest = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Quest", 10);
     RandomStackRatioKey = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Key", 10);
     RandomStackRatioMisc = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Misc", 100);
-    RandomStackRatioGlyph = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Glyph", 0);
 
     // Stack Increments
     RandomStackIncrementConsumable = GetRandomStackIncrementValue("AuctionHouseBot.ListingStack.RandomStackIncrement.Consumable", 5);
@@ -2051,24 +2131,22 @@ void AuctionHouseBot::InitializeConfiguration()
     RandomStackIncrementQuest = GetRandomStackIncrementValue("AuctionHouseBot.ListingStack.RandomStackIncrement.Quest", 1);
     RandomStackIncrementKey = GetRandomStackIncrementValue("AuctionHouseBot.ListingStack.RandomStackIncrement.Key", 1);
     RandomStackIncrementMisc = GetRandomStackIncrementValue("AuctionHouseBot.ListingStack.RandomStackIncrement.Misc", 1);
-    RandomStackIncrementGlyph = GetRandomStackIncrementValue("AuctionHouseBot.ListingStack.RandomStackIncrement.Glyph", 1);
 
     // Max stack size
-    MaximumStackSizeConsumable = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Consumable", 0);
-    MaximumStackSizeContainer = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Container", 0);
-    MaximumStackSizeWeapon = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Weapon", 0);
-    MaximumStackSizeGem = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Gem", 0);
-    MaximumStackSizeArmor = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Armor", 0);
-    MaximumStackSizeReagent = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Reagent", 0);
-    MaximumStackSizeProjectile = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Projectile", 0);
-    MaximumStackSizeTradeGood = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.TradeGood", 0);
-    MaximumStackSizeGeneric = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Generic", 0);
-    MaximumStackSizeRecipe = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Recipe", 0);
-    MaximumStackSizeQuiver = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Quiver", 0);
-    MaximumStackSizeQuest = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Quest", 0);
-    MaximumStackSizeKey = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Key", 0);
-    MaximumStackSizeMisc = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Misc", 0);
-    MaximumStackSizeGlyph = sConfigMgr->GetOption<uint32>("AuctionHouseBot.ListingStack.MaxStackSize.Glyph", 0);
+    MaximumStackSizeConsumable = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Consumable", 0);
+    MaximumStackSizeContainer = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Container", 0);
+    MaximumStackSizeWeapon = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Weapon", 0);
+    MaximumStackSizeGem = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Gem", 0);
+    MaximumStackSizeArmor = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Armor", 0);
+    MaximumStackSizeReagent = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Reagent", 0);
+    MaximumStackSizeProjectile = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Projectile", 0);
+    MaximumStackSizeTradeGood = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.TradeGood", 0);
+    MaximumStackSizeGeneric = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Generic", 0);
+    MaximumStackSizeRecipe = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Recipe", 0);
+    MaximumStackSizeQuiver = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Quiver", 0);
+    MaximumStackSizeQuest = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Quest", 0);
+    MaximumStackSizeKey = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Key", 0);
+    MaximumStackSizeMisc = GetConfigUInt("AuctionHouseBot.ListingStack.MaxStackSize.Misc", 0);
 
     // List proportions
     ItemListProportionNodesSeed.clear();
@@ -2082,53 +2160,49 @@ void AuctionHouseBot::InitializeConfiguration()
                 ListProportionNode node;
                 node.ItemClassID = category;
                 node.ItemQualityID = quality;
-                node.Proportion = sConfigMgr->GetOption<uint32>(key.c_str(), 0);
+                node.Proportion = GetConfigUInt(key.c_str(), 0);
                 ItemListProportionNodesSeed.push_back(node);
             }
         }
     }
     ItemListProportionMultipliedItemIDs.clear();
-    AddItemValuePairsToItemIDMap(ItemListProportionMultipliedItemIDs, sConfigMgr->GetOption<std::string>("AuctionHouseBot.ListProportion.ListMultipliedItemIDs", ""));
+    AddItemValuePairsToItemIDMap(ItemListProportionMultipliedItemIDs, GetConfigString("AuctionHouseBot.ListProportion.ListMultipliedItemIDs", ""));
 
-    // Price Multipliers
-    PriceMultiplierCategoryConsumable = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Consumable", 1);
-    PriceMultiplierCategoryContainer = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Container", 1);
-    PriceMultiplierCategoryWeapon = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Weapon", 1);
-    PriceMultiplierCategoryGem = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Gem", 1);
-    PriceMultiplierCategoryArmor = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Armor", 1);
-    PriceMultiplierCategoryReagent = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Reagent", 1);
-    PriceMultiplierCategoryProjectile = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Projectile", 1);
-    PriceMultiplierCategoryTradeGood = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.TradeGood", 1);
-    PriceMultiplierCategoryGeneric = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Generic", 1);
-    PriceMultiplierCategoryRecipe = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Recipe", 1);
-    PriceMultiplierCategoryQuiver = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Quiver", 1);
-    PriceMultiplierCategoryQuest = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Quest", 1);
-    PriceMultiplierCategoryKey = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Key", 1);
-    PriceMultiplierCategoryMisc = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Misc", 1);
-    PriceMultiplierCategoryGlyph = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Category.Glyph", 1);
-    PriceMultiplierItemLevelCategoryConsumable = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Consumable", 0);
-    PriceMultiplierItemLevelCategoryContainer = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Container", 0);
-    PriceMultiplierItemLevelCategoryWeapon = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Weapon", 0);
-    PriceMultiplierItemLevelCategoryGem = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Gem", 0);
-    PriceMultiplierItemLevelCategoryArmor = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Armor", 0);
-    PriceMultiplierItemLevelCategoryReagent = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Reagent", 0);
-    PriceMultiplierItemLevelCategoryProjectile = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Projectile", 0);
-    PriceMultiplierItemLevelCategoryTradeGood = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.TradeGood", 0);
-    PriceMultiplierItemLevelCategoryGeneric = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Generic", 0);
-    PriceMultiplierItemLevelCategoryRecipe = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Recipe", 0);
-    PriceMultiplierItemLevelCategoryQuiver = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Quiver", 0);
-    PriceMultiplierItemLevelCategoryQuest = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Quest", 0);
-    PriceMultiplierItemLevelCategoryKey = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Key", 0);
-    PriceMultiplierItemLevelCategoryMisc = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Misc", 0);
-    PriceMultiplierItemLevelCategoryGlyph = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Glyph", 0);
-    PriceMultiplierQualityPoor = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Poor", 1);
-    PriceMultiplierQualityNormal = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Normal", 1);
-    PriceMultiplierQualityUncommon = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Uncommon", 1.8);
-    PriceMultiplierQualityRare = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Rare", 1.9);
-    PriceMultiplierQualityEpic = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Epic", 2.1);
-    PriceMultiplierQualityLegendary = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Legendary", 3);
-    PriceMultiplierQualityArtifact = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Artifact", 3);
-    PriceMultiplierQualityHeirloom = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.Quality.Heirloom", 3);
+    PriceMultiplierCategoryConsumable = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Consumable", 1);
+    PriceMultiplierCategoryContainer = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Container", 1);
+    PriceMultiplierCategoryWeapon = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Weapon", 1);
+    PriceMultiplierCategoryGem = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Gem", 1);
+    PriceMultiplierCategoryArmor = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Armor", 1);
+    PriceMultiplierCategoryReagent = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Reagent", 1);
+    PriceMultiplierCategoryProjectile = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Projectile", 1);
+    PriceMultiplierCategoryTradeGood = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.TradeGood", 1);
+    PriceMultiplierCategoryGeneric = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Generic", 1);
+    PriceMultiplierCategoryRecipe = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Recipe", 1);
+    PriceMultiplierCategoryQuiver = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Quiver", 1);
+    PriceMultiplierCategoryQuest = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Quest", 1);
+    PriceMultiplierCategoryKey = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Key", 1);
+    PriceMultiplierCategoryMisc = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Category.Misc", 1);
+    PriceMultiplierItemLevelCategoryConsumable = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Consumable", 0);
+    PriceMultiplierItemLevelCategoryContainer = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Container", 0);
+    PriceMultiplierItemLevelCategoryWeapon = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Weapon", 0);
+    PriceMultiplierItemLevelCategoryGem = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Gem", 0);
+    PriceMultiplierItemLevelCategoryArmor = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Armor", 0);
+    PriceMultiplierItemLevelCategoryReagent = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Reagent", 0);
+    PriceMultiplierItemLevelCategoryProjectile = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Projectile", 0);
+    PriceMultiplierItemLevelCategoryTradeGood = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.TradeGood", 0);
+    PriceMultiplierItemLevelCategoryGeneric = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Generic", 0);
+    PriceMultiplierItemLevelCategoryRecipe = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Recipe", 0);
+    PriceMultiplierItemLevelCategoryQuiver = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Quiver", 0);
+    PriceMultiplierItemLevelCategoryQuest = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Quest", 0);
+    PriceMultiplierItemLevelCategoryKey = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Key", 0);
+    PriceMultiplierItemLevelCategoryMisc = GetConfigFloat("AuctionHouseBot.PriceMultiplier.ItemLevel.Category.Misc", 0);
+    PriceMultiplierQualityPoor = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Poor", 1);
+    PriceMultiplierQualityNormal = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Normal", 1);
+    PriceMultiplierQualityUncommon = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Uncommon", 1.8f);
+    PriceMultiplierQualityRare = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Rare", 1.9f);
+    PriceMultiplierQualityEpic = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Epic", 2.1f);
+    PriceMultiplierQualityLegendary = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Legendary", 3);
+    PriceMultiplierQualityArtifact = GetConfigFloat("AuctionHouseBot.PriceMultiplier.Quality.Artifact", 3);
     for (int category = 0; category < MAX_ITEM_CLASS; category++)
     {
         for (int quality = 0; quality < MAX_ITEM_QUALITY; quality++)
@@ -2136,110 +2210,107 @@ void AuctionHouseBot::InitializeConfiguration()
             std::string key = std::string("AuctionHouseBot.PriceMultiplier.Category") + GetCategoryName((ItemClass)category) +
                             ".Quality" + GetQualityName((ItemQualities)quality);
 
-            float multiplier = sConfigMgr->GetOption<float>(key.c_str(), 1.0f);
+            float multiplier = GetConfigFloat(key.c_str(), 1.0f);
             PriceMultiplierCategoryQuality[category][quality] = multiplier;
         }
     }
-    PriceMultiplierCategoryMountQualityPoor = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityPoor", 1.0);
-    PriceMultiplierCategoryMountQualityNormal = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityNormal", 1.0);
-    PriceMultiplierCategoryMountQualityUncommon = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityUncommon", 1.0);
-    PriceMultiplierCategoryMountQualityRare = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityRare", 3000.0);
-    PriceMultiplierCategoryMountQualityEpic = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityEpic", 5750.0);
-    PriceMultiplierCategoryMountQualityLegendary = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityLegendary", 1.0);
-    PriceMultiplierCategoryMountQualityArtifact = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityArtifact", 1.0);
-    PriceMultiplierCategoryMountQualityHeirloom = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityHeirloom", 1.0);
+    PriceMultiplierCategoryMountQualityPoor = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityPoor", 1.0f);
+    PriceMultiplierCategoryMountQualityNormal = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityNormal", 1.0f);
+    PriceMultiplierCategoryMountQualityUncommon = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityUncommon", 1.0f);
+    PriceMultiplierCategoryMountQualityRare = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityRare", 3000.0f);
+    PriceMultiplierCategoryMountQualityEpic = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityEpic", 5750.0f);
+    PriceMultiplierCategoryMountQualityLegendary = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityLegendary", 1.0f);
+    PriceMultiplierCategoryMountQualityArtifact = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryMount.QualityArtifact", 1.0f);
 
-    PriceMultiplierCategoryPetQualityPoor = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityPoor", 1.0);
-    PriceMultiplierCategoryPetQualityNormal = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityNormal", 1.0);
-    PriceMultiplierCategoryPetQualityUncommon = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityUncommon", 1.0);
-    PriceMultiplierCategoryPetQualityRare = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityRare", 1.0);
-    PriceMultiplierCategoryPetQualityEpic = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityEpic", 1.0);
-    PriceMultiplierCategoryPetQualityLegendary = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityLegendary", 1.0);
-    PriceMultiplierCategoryPetQualityArtifact = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityArtifact", 1.0);
-    PriceMultiplierCategoryPetQualityHeirloom = sConfigMgr->GetOption<float>("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityHeirloom", 1.0);
+    PriceMultiplierCategoryPetQualityPoor = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityPoor", 1.0f);
+    PriceMultiplierCategoryPetQualityNormal = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityNormal", 1.0f);
+    PriceMultiplierCategoryPetQualityUncommon = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityUncommon", 1.0f);
+    PriceMultiplierCategoryPetQualityRare = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityRare", 1.0f);
+    PriceMultiplierCategoryPetQualityEpic = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityEpic", 1.0f);
+    PriceMultiplierCategoryPetQualityLegendary = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityLegendary", 1.0f);
+    PriceMultiplierCategoryPetQualityArtifact = GetConfigFloat("AuctionHouseBot.PriceMultiplier.CategoryPet.QualityArtifact", 1.0f);
 
     // Advanced Pricing
-    AdvancedPricingConsumablePotionEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Consumable.Potion.Enabled", true);
-    AdvancedPricingConsumableElixirEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Consumable.Elixir.Enabled", true);
-    AdvancedPricingConsumableFlaskEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Consumable.Flask.Enabled", true);
-    AdvancedPricingGemEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Gem.Enabled", true);
-    AdvancedPricingTradeGoodClothEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Cloth.Enabled", true);
-    AdvancedPricingTradeGoodHerbEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Herb.Enabled", true);
-    AdvancedPricingTradeGoodMetalStoneEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.MetalStone.Enabled", true);
-    AdvancedPricingTradeGoodLeatherEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Leather.Enabled", true);
-    AdvancedPricingTradeGoodEnchantingEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Enchanting.Enabled", true);
-    AdvancedPricingTradeGoodElementalEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Elemental.Enabled", true);
-    AdvancedPricingTradeGoodMeatEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.TradeGood.Meat.Enabled", true);
-    AdvancedPricingMiscJunkEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Misc.Junk.Enabled", true);
-    AdvancedPricingMiscMountEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Misc.Mount.Enabled", true);
-    AdvancedPricingMiscPetEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedPricing.Misc.Pet.Enabled", true);
+    AdvancedPricingConsumablePotionEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Consumable.Potion.Enabled", true);
+    AdvancedPricingConsumableElixirEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Consumable.Elixir.Enabled", true);
+    AdvancedPricingConsumableFlaskEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Consumable.Flask.Enabled", true);
+    AdvancedPricingGemEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Gem.Enabled", true);
+    AdvancedPricingTradeGoodClothEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Cloth.Enabled", true);
+    AdvancedPricingTradeGoodHerbEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Herb.Enabled", true);
+    AdvancedPricingTradeGoodMetalStoneEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.MetalStone.Enabled", true);
+    AdvancedPricingTradeGoodLeatherEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Leather.Enabled", true);
+    AdvancedPricingTradeGoodEnchantingEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Enchanting.Enabled", true);
+    AdvancedPricingTradeGoodElementalEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Elemental.Enabled", true);
+    AdvancedPricingTradeGoodMeatEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.TradeGood.Meat.Enabled", true);
+    AdvancedPricingMiscJunkEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Misc.Junk.Enabled", true);
+    AdvancedPricingMiscMountEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Misc.Mount.Enabled", true);
+    AdvancedPricingMiscPetEnabled = GetConfigBool("AuctionHouseBot.AdvancedPricing.Misc.Pet.Enabled", true);
 
     // Price minimums
-    UseItemSellPriceIfHigherThanPriceMinimumCenterBase = sConfigMgr->GetOption<bool>("AuctionHouseBot.PriceMinimumCenterBase.UseItemSellPriceIfHigher", true);
-    PriceMinimumCenterBaseConsumable = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Consumable",1000);
-    PriceMinimumCenterBaseContainer = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Container", 1000);
-    PriceMinimumCenterBaseWeapon = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Weapon", 1000);
-    PriceMinimumCenterBaseGem = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Gem", 1000);
-    PriceMinimumCenterBaseArmor = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Armor", 1000);
-    PriceMinimumCenterBaseReagent = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Reagent", 1000);
-    PriceMinimumCenterBaseProjectile = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Projectile", 5);
-    PriceMinimumCenterBaseTradeGood = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.TradeGood", 850);
-    PriceMinimumCenterBaseGeneric = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Generic", 1000);
-    PriceMinimumCenterBaseRecipe = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Recipe", 1000);
-    PriceMinimumCenterBaseQuiver = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Quiver", 1000);
-    PriceMinimumCenterBaseQuest = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Quest", 1000);
-    PriceMinimumCenterBaseKey = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Key", 1000);
-    PriceMinimumCenterBaseMisc = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Misc", 1000);
-    PriceMinimumCenterBaseGlyph = sConfigMgr->GetOption<uint32>("AuctionHouseBot.PriceMinimumCenterBase.Glyph", 1000);
-    AddItemValuePairsToItemIDMap(PriceMinimumCenterBaseOverridesByItemID, sConfigMgr->GetOption<std::string>("AuctionHouseBot.PriceMinimumCenterBase.OverrideItems", ""));
+    UseItemSellPriceIfHigherThanPriceMinimumCenterBase = GetConfigBool("AuctionHouseBot.PriceMinimumCenterBase.UseItemSellPriceIfHigher", true);
+    PriceMinimumCenterBaseConsumable = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Consumable",1000);
+    PriceMinimumCenterBaseContainer = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Container", 1000);
+    PriceMinimumCenterBaseWeapon = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Weapon", 1000);
+    PriceMinimumCenterBaseGem = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Gem", 1000);
+    PriceMinimumCenterBaseArmor = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Armor", 1000);
+    PriceMinimumCenterBaseReagent = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Reagent", 1000);
+    PriceMinimumCenterBaseProjectile = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Projectile", 5);
+    PriceMinimumCenterBaseTradeGood = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.TradeGood", 850);
+    PriceMinimumCenterBaseGeneric = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Generic", 1000);
+    PriceMinimumCenterBaseRecipe = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Recipe", 1000);
+    PriceMinimumCenterBaseQuiver = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Quiver", 1000);
+    PriceMinimumCenterBaseQuest = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Quest", 1000);
+    PriceMinimumCenterBaseKey = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Key", 1000);
+    PriceMinimumCenterBaseMisc = GetConfigUInt("AuctionHouseBot.PriceMinimumCenterBase.Misc", 1000);
+    AddItemValuePairsToItemIDMap(PriceMinimumCenterBaseOverridesByItemID, GetConfigString("AuctionHouseBot.PriceMinimumCenterBase.OverrideItems", ""));
 
     // Item level Restrictions
-    ListedItemLevelRestrictedEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.ListedItemLevelRestrict.Enabled", false);
-    ListedItemLevelRestrictedUseCraftedItemForCalculation = sConfigMgr->GetOption<bool>("AuctionHouseBot.ListedItemLevelRestrict.UseCraftedItemForCalculation", true);
-    ListedItemLevelMin = sConfigMgr->GetOption("AuctionHouseBot.ListedItemLevelRestrict.MinItemLevel", 0);
-    ListedItemLevelMax = sConfigMgr->GetOption("AuctionHouseBot.ListedItemLevelRestrict.MaxItemLevel", 999);
+    ListedItemLevelRestrictedEnabled = GetConfigBool("AuctionHouseBot.ListedItemLevelRestrict.Enabled", false);
+    ListedItemLevelRestrictedUseCraftedItemForCalculation = GetConfigBool("AuctionHouseBot.ListedItemLevelRestrict.UseCraftedItemForCalculation", true);
+    ListedItemLevelMin = GetConfigUInt("AuctionHouseBot.ListedItemLevelRestrict.MinItemLevel", 0);
+    ListedItemLevelMax = GetConfigUInt("AuctionHouseBot.ListedItemLevelRestrict.MaxItemLevel", 999);
     ListedItemLevelExceptionItems.clear();
-    ParseNumberListToSet(ListedItemLevelExceptionItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.ListedItemLevelRestrict.ExceptionItemIDs", ""), "ListedItemLevelRestrict.ExceptionItemIDs");
+    ParseNumberListToSet(ListedItemLevelExceptionItems, GetConfigString("AuctionHouseBot.ListedItemLevelRestrict.ExceptionItemIDs", ""), "ListedItemLevelRestrict.ExceptionItemIDs");
 
     // Item ID Restrictions
-    ListedItemIDRestrictedEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.ListedItemIDRestrict.Enabled", false);
-    ListedItemIDMin = sConfigMgr->GetOption("AuctionHouseBot.ListedItemIDRestrict.MinItemID", 0);
-    ListedItemIDMax = sConfigMgr->GetOption("AuctionHouseBot.ListedItemIDRestrict.MaxItemID", 200000);
+    ListedItemIDRestrictedEnabled = GetConfigBool("AuctionHouseBot.ListedItemIDRestrict.Enabled", false);
+    ListedItemIDMin = GetConfigUInt("AuctionHouseBot.ListedItemIDRestrict.MinItemID", 0);
+    ListedItemIDMax = GetConfigUInt("AuctionHouseBot.ListedItemIDRestrict.MaxItemID", 200000);
     ListedItemIDExceptionItems.clear();
-    ParseNumberListToSet(ListedItemIDExceptionItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.ListedItemIDRestrict.ExceptionItemIDs", ""), "ListedItemIDRestrict.ExceptionItemIDs");
+    ParseNumberListToSet(ListedItemIDExceptionItems, GetConfigString("AuctionHouseBot.ListedItemIDRestrict.ExceptionItemIDs", ""), "ListedItemLevelRestrict.ExceptionItemIDs");
 
     // Equip or use restrictions
-    ListedItemUseOrEquipRestrictedEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.Enabled", false);
-    ListedItemUseOrEquipRestrictMinLevel = sConfigMgr->GetOption("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.MinLevel", 0);
-    ListedItemUseOrEquipRestrictMaxLevel = sConfigMgr->GetOption("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.MaxLevel", 999);
+    ListedItemUseOrEquipRestrictedEnabled = GetConfigBool("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.Enabled", false);
+    ListedItemUseOrEquipRestrictMinLevel = GetConfigUInt("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.MinLevel", 0);
+    ListedItemUseOrEquipRestrictMaxLevel = GetConfigUInt("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.MaxLevel", 999);
     ListedItemUseOrEquipExceptionItems.clear();
-    ParseNumberListToSet(ListedItemUseOrEquipExceptionItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.ExceptionItemIDs", ""), "EquipItemUseOrEquipLevelRestrict.ExceptionItemIDs");
+    ParseNumberListToSet(ListedItemUseOrEquipExceptionItems, GetConfigString("AuctionHouseBot.EquipItemUseOrEquipLevelRestrict.ExceptionItemIDs", ""), "EquipItemUseOrEquipLevelRestrict.ExceptionItemIDs");
 
     // Disabled Items
-    DisabledItemTextFilter = sConfigMgr->GetOption<bool>("AuctionHouseBot.DisabledItemTextFilter", true);
-    DisabledRecipeProducedItemFilterEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.DisabledRecipeProducedItemFilterEnabled", false);
+    DisabledItemTextFilter = GetConfigBool("AuctionHouseBot.DisabledItemTextFilter", true);
+    DisabledRecipeProducedItemFilterEnabled = GetConfigBool("AuctionHouseBot.DisabledRecipeProducedItemFilterEnabled", false);
     DisabledItems.clear();
-    ParseNumberListToSet(DisabledItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.DisabledInvalidItemIDs", ""), "AuctionHouseBot.DisabledInvalidItemIDs");
-    ParseNumberListToSet(DisabledItems, sConfigMgr->GetOption<std::string>("AuctionHouseBot.DisabledCustomItemIDs", ""), "AuctionHouseBot.DisabledCustomItemIDs");
-    AddValuesToSetByKeyMap(DisabledRecipeProducedItemClassSubClasses, sConfigMgr->GetOption<std::string>("AuctionHouseBot.DisabledRecipeProducedItemClassSubClasses", ""), 0, 20);
+    ParseNumberListToSet(DisabledItems, GetConfigString("AuctionHouseBot.DisabledInvalidItemIDs", ""), "AuctionHouseBot.DisabledInvalidItemIDs");
+    ParseNumberListToSet(DisabledItems, GetConfigString("AuctionHouseBot.DisabledCustomItemIDs", ""), "AuctionHouseBot.DisabledCustomItemIDs");
+    AddValuesToSetByKeyMap(DisabledRecipeProducedItemClassSubClasses, GetConfigString("AuctionHouseBot.DisabledRecipeProducedItemClassSubClasses", ""), 0, 20);
 
-    if (!sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION))
+    if (!sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_AUCTION))
     {
-        AllianceConfig.SetMinItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Alliance.MinItems", 15000));
-        AllianceConfig.SetMaxItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Alliance.MaxItems", 15000));
+        AllianceConfig.SetMinItems(GetConfigUInt("AuctionHouseBot.Alliance.MinItems", 15000));
+        AllianceConfig.SetMaxItems(GetConfigUInt("AuctionHouseBot.Alliance.MaxItems", 15000));
 
-        HordeConfig.SetMinItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Horde.MinItems", 15000));
-        HordeConfig.SetMaxItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Horde.MaxItems", 15000));
+        HordeConfig.SetMinItems(GetConfigUInt("AuctionHouseBot.Horde.MinItems", 15000));
+        HordeConfig.SetMaxItems(GetConfigUInt("AuctionHouseBot.Horde.MaxItems", 15000));
     }
-    NeutralConfig.SetMinItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Neutral.MinItems", 15000));
-    NeutralConfig.SetMaxItems(sConfigMgr->GetOption<uint32>("AuctionHouseBot.Neutral.MaxItems", 15000));
+    NeutralConfig.SetMinItems(GetConfigUInt("AuctionHouseBot.Neutral.MinItems", 15000));
+    NeutralConfig.SetMaxItems(GetConfigUInt("AuctionHouseBot.Neutral.MaxItems", 15000));
 }
 
 void AuctionHouseBot::EmptyAuctionHouses()
 {
     if (AHCharactersGUIDsForQuery.empty())
     {
-        LOG_ERROR("module", "AuctionHouseBot: No character GUIDs found when emptying Auction Houses via '.ahbot empty' .");
+        sLog.outError("AuctionHouseBot: No character GUIDs found when emptying Auction Houses via '.ahbot empty' .");
         return;
     }
 
@@ -2249,13 +2320,17 @@ void AuctionHouseBot::EmptyAuctionHouses()
         uint32 houseID {0};
     };
     vector<AuctionInfo> ahBotActiveAuctions;
-    auto trans = CharacterDatabase.BeginTransaction();
+
+    CharacterDatabase.BeginTransaction();
 
     // Get all auctions owned by AHBots
-    std::string queryString = "SELECT id, buyguid, houseid FROM auctionhouse WHERE itemowner IN ({})";
-    QueryResult result = CharacterDatabase.Query(queryString, AHCharactersGUIDsForQuery);
+    std::string queryString = "SELECT id, buyguid, houseid FROM auction WHERE itemowner IN (%s)";
+    QueryResult* result = CharacterDatabase.PQuery(queryString.c_str(), AHCharactersGUIDsForQuery.c_str());
     if (!result)
+    {
+        CharacterDatabase.CommitTransaction();
         return;
+    }
 
     if (result->GetRowCount() > 0)
     {
@@ -2264,14 +2339,16 @@ void AuctionHouseBot::EmptyAuctionHouses()
         {
             Field* fields = result->Fetch();
             AuctionInfo ai = {
-                fields[0].Get<uint32>(),
-                fields[1].Get<uint32>(),
-                fields[2].Get<uint32>()
+                fields[0].GetUInt32(),
+                fields[1].GetUInt32(),
+                fields[2].GetUInt32()
             };
             ahBotActiveAuctions.push_back(ai);
         } while (result->NextRow());
 
         // For each auction, refund bidder where possible, delete entry from AH
+        delete result;
+
         AuctionHouseObject* auctionHouse;
         for (auto iter = ahBotActiveAuctions.begin(); iter != ahBotActiveAuctions.end(); ++iter)
         {
@@ -2280,9 +2357,9 @@ void AuctionHouseBot::EmptyAuctionHouses()
             // Get Auction House and Auction references
             auctionHouse = nullptr;
             switch (ai.houseID) {
-                case 2: auctionHouse = sAuctionMgr->GetAuctionsMap(AllianceConfig.GetAHFID()); break;
-                case 6: auctionHouse = sAuctionMgr->GetAuctionsMap(HordeConfig.GetAHFID()); break;
-                case 7: auctionHouse = sAuctionMgr->GetAuctionsMap(NeutralConfig.GetAHFID()); break;
+                case 1: auctionHouse = sAuctionMgr.GetAuctionsMap(sAuctionMgr.GetAuctionHouseEntry(AllianceConfig.GetAHFID())); break;
+                case 6: auctionHouse = sAuctionMgr.GetAuctionsMap(sAuctionMgr.GetAuctionHouseEntry(HordeConfig.GetAHFID())); break;
+                case 7: auctionHouse = sAuctionMgr.GetAuctionsMap(sAuctionMgr.GetAuctionHouseEntry(NeutralConfig.GetAHFID())); break;
             }
             if (auctionHouse == nullptr)
                 continue;
@@ -2293,30 +2370,79 @@ void AuctionHouseBot::EmptyAuctionHouses()
 
             // If auction has a bidder, refund that character
             if (ai.characterGUID != 0)
-                sAuctionMgr->SendAuctionCancelledToBidderMail(auction,  trans);
+            {
+                ObjectGuid bidderGuid = ObjectGuid(HIGHGUID_PLAYER, ai.characterGUID);
+                if (Player* bidder = sObjectMgr.GetPlayer(bidderGuid))
+                {
+                    std::ostringstream subject;
+                    subject << auction->itemTemplate << ":0:" << AUCTION_CANCELLED_TO_BIDDER;
+                    MailDraft(subject.str())
+                        .SetMoney(auction->bid)
+                        .SendMailTo(MailReceiver(bidder, bidderGuid), auction, MAIL_CHECK_MASK_COPIED);
+                }
+            }
 
-            // Return item to AHBot if configured, else delete it
-            if (ReturnExpiredAuctionItemsToBot)
-                sAuctionMgr->SendAuctionExpiredMail(auction, trans, true, true);
-            else
-                Item::DeleteFromDB(trans, auction->item_guid.GetCounter());
-
+            CharacterDatabase.PExecute("DELETE FROM item_instance WHERE guid = '%u'", auction->itemGuidLow);
             // Remove auction from AH
-            auction->DeleteFromDB(trans);
-            sAuctionMgr->RemoveAItem(auction->item_guid);
+            auction->DeleteFromDB();
+            sAuctionMgr.RemoveAItem(auction->itemGuidLow);
             auctionHouse->RemoveAuction(auction);
         }
     }
+    else
+    {
+        delete result;
+    }
 
-    CharacterDatabase.CommitTransaction(trans);
+    CharacterDatabase.CommitTransaction();
+}
+
+void AuctionHouseBot::CleanupBotMail()
+{
+    if (AHCharactersGUIDsForQuery.empty())
+        return;
+
+    CharacterDatabase.BeginTransaction();
+
+    std::string itemGuidsQuery = "SELECT mi.item_guid FROM mail_items mi JOIN mail m ON mi.mail_id = m.id WHERE m.receiver IN (%s)";
+    QueryResult* itemGuidsResult = CharacterDatabase.PQuery(itemGuidsQuery.c_str(), AHCharactersGUIDsForQuery.c_str());
+
+    std::vector<uint32> itemGuidsToDelete;
+    if (itemGuidsResult)
+    {
+        do
+        {
+            itemGuidsToDelete.push_back(itemGuidsResult->Fetch()->GetUInt32());
+        } while (itemGuidsResult->NextRow());
+        delete itemGuidsResult;
+    }
+
+    CharacterDatabase.PExecute("DELETE mi FROM mail_items mi JOIN mail m ON mi.mail_id = m.id WHERE m.receiver IN (%s)", AHCharactersGUIDsForQuery.c_str());
+    CharacterDatabase.PExecute("DELETE FROM mail WHERE receiver IN (%s)", AHCharactersGUIDsForQuery.c_str());
+
+    if (ReturnExpiredAuctionItemsToBot)
+    {
+        for (uint32 itemGuid : itemGuidsToDelete)
+            CharacterDatabase.PExecute("UPDATE item_instance SET owner_guid = '%u' WHERE guid = '%u'", AHCharacters[0].CharacterGUID, itemGuid);
+    }
+    else
+    {
+        for (uint32 itemGuid : itemGuidsToDelete)
+            CharacterDatabase.PExecute("DELETE FROM item_instance WHERE guid = '%u'", itemGuid);
+    }
+
+    CharacterDatabase.CommitTransaction();
+
+    if (debug_Out)
+        sLog.outString("AuctionHouseBot: Cleaned up bot mail. Items handled: %zu", itemGuidsToDelete.size());
 }
 
 uint32 AuctionHouseBot::GetRandomStackValue(std::string configKeyString, uint32 defaultValue)
 {
-    uint32 stackValue = sConfigMgr->GetOption<uint32>(configKeyString, defaultValue);
+    uint32 stackValue = GetConfigUInt(configKeyString.c_str(), defaultValue);
     if (stackValue > 100 || stackValue < 0)
     {
-        LOG_ERROR("module", "{} value is invalid.  Setting to default ({}).", configKeyString, defaultValue);
+        sLog.outError("%s value is invalid.  Setting to default (%u).", configKeyString.c_str(), defaultValue);
         stackValue = defaultValue;
     }
     return stackValue;
@@ -2324,10 +2450,10 @@ uint32 AuctionHouseBot::GetRandomStackValue(std::string configKeyString, uint32 
 
 uint32 AuctionHouseBot::GetRandomStackIncrementValue(std::string configKeyString, uint32 defaultValue)
 {
-    uint32 stackIncrementValue = sConfigMgr->GetOption<uint32>(configKeyString, defaultValue);
+    uint32 stackIncrementValue = GetConfigUInt(configKeyString.c_str(), defaultValue);
     if (stackIncrementValue <= 0)
     {
-        LOG_ERROR("module", "{} value is invalid.  Setting to default ({}).", configKeyString, defaultValue);
+        sLog.outError("%s value is invalid.  Setting to default (%u).", configKeyString.c_str(), defaultValue);
         stackIncrementValue = defaultValue;
     }
     return stackIncrementValue;
@@ -2335,18 +2461,18 @@ uint32 AuctionHouseBot::GetRandomStackIncrementValue(std::string configKeyString
 
 void AuctionHouseBot::SetCyclesBetweenBuyOrSell()
 {
-    std::string buyCyclesConfigString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.MinutesBetweenBuyCycle", "1");
+    std::string buyCyclesConfigString = GetConfigString("AuctionHouseBot.MinutesBetweenBuyCycle", "1");
     GetConfigMinAndMax(buyCyclesConfigString, CyclesBetweenBuyActionMin, CyclesBetweenBuyActionMax);
     CyclesBetweenBuyAction = urand(CyclesBetweenBuyActionMin, CyclesBetweenBuyActionMax);
 
-    std::string sellCyclesConfigString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.MinutesBetweenSellCycle", "1");
+    std::string sellCyclesConfigString = GetConfigString("AuctionHouseBot.MinutesBetweenSellCycle", "1");
     GetConfigMinAndMax(sellCyclesConfigString, CyclesBetweenSellActionMin, CyclesBetweenSellActionMax);
     CyclesBetweenSellAction = urand(CyclesBetweenSellActionMin, CyclesBetweenSellActionMax);
 }
 
 void AuctionHouseBot::SetBuyingBotBuyCandidatesPerBuyCycle()
 {
-    std::string candidatesPerCycleString = sConfigMgr->GetOption<string>("AuctionHouseBot.Buyer.BuyCandidatesPerBuyCycle", "1");
+    std::string candidatesPerCycleString = GetConfigString("AuctionHouseBot.Buyer.BuyCandidatesPerBuyCycle", "1");
     GetConfigMinAndMax(candidatesPerCycleString, BuyingBotBuyCandidatesPerBuyCycleMin, BuyingBotBuyCandidatesPerBuyCycleMax);
 }
 
@@ -2376,7 +2502,7 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
 
     // Grab from the string
     characterGUIDStream.str(characterGUIDString);
-    while (std::getline(characterGUIDStream, delimitedValue, ',')) // Process each charecter GUID in the string, delimited by the comma ","
+    while (std::getline(characterGUIDStream, delimitedValue, ','))
     {
         std::string valueOne;
         std::stringstream characterGUIDStream(delimitedValue);
@@ -2387,7 +2513,7 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         if (characterGUIDs.find(characterGUID) != characterGUIDs.end())
         {
             if (debug_Out)
-                LOG_ERROR("module", "AuctionHouseBot: Duplicate character with GUID of {} found, skipping", characterGUID);
+                sLog.outError("AuctionHouseBot: Duplicate character with GUID of %u found, skipping", characterGUID);
         }
         else
             characterGUIDs.insert(characterGUID);
@@ -2396,7 +2522,7 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
     // Lookup accounts and add them
     if (characterGUIDs.empty() == true)
     {
-        LOG_ERROR("module", "AuctionHouseBot: No character GUIDs were supplied. Be sure to set AuctionHouseBot.GUIDs");
+        sLog.outError("AuctionHouseBot: No character GUIDs were supplied. Be sure to set AuctionHouseBot.GUIDs");
         return;
     }
     AHCharactersGUIDsForQuery = "";
@@ -2410,21 +2536,25 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         AHCharactersGUIDsForQuery += std::to_string(curGUID);
         first = false;
     }
-    QueryResult queryResult = CharacterDatabase.Query("SELECT `guid`, `account` FROM `characters` WHERE guid IN ({})", AHCharactersGUIDsForQuery);
+    QueryResult* queryResult = CharacterDatabase.PQuery("SELECT `guid`, `account` FROM `characters` WHERE guid IN (%s)", AHCharactersGUIDsForQuery.c_str());
     if (!queryResult || queryResult->GetRowCount() == 0)
     {
-        LOG_ERROR("module", "AuctionHouseBot: No character GUIDs found when looking up values from AuctionHouseBot.GUIDs from the character database 'characters.guid'.");
+        sLog.outError("AuctionHouseBot: No character GUIDs found when looking up values from AuctionHouseBot.GUIDs from the character database 'characters.guid'.");
+        if (queryResult)
+            delete queryResult;
         return;
     }
     do
     {
         // Pull the data out
         Field* fields = queryResult->Fetch();
-        uint32 guid = fields[0].Get<uint32>();
-        uint32 account = fields[1].Get<uint32>();
+        uint32 guid = fields[0].GetUInt32();
+        uint32 account = fields[1].GetUInt32();
         AuctionHouseBotCharacter curChar = AuctionHouseBotCharacter(account, guid);
         AHCharacters.push_back(curChar);
     } while (queryResult->NextRow());
+
+    delete queryResult;
 }
 
 template <typename ValueType>
@@ -2511,7 +2641,7 @@ void AuctionHouseBot::ParseNumberListToSet(std::set<uint32>& workingItemIDSet, s
 
             if (leftId > rightId)
             {
-                LOG_ERROR("module", "AuctionHouseBot: Duplicate item ID range of {} to {} needs to be smallest to largest for {}, skipping", leftId, rightId, parentOperationName);
+                sLog.outError("AuctionHouseBot: Duplicate item ID range of %u to %u needs to be smallest to largest for %s, skipping", leftId, rightId, parentOperationName);
             }
             else
             {
@@ -2532,7 +2662,7 @@ void AuctionHouseBot::AddToNumberListSet(std::set<uint32>& workingItemIDSet, uin
     if (workingItemIDSet.find(itemID) != workingItemIDSet.end())
     {
         if (debug_Out)
-            LOG_ERROR("module", "AuctionHouseBot: Duplicate item id {} attempted to be put into a working item set from operation {}, skipping", itemID, parentOperationName);
+            sLog.outError("AuctionHouseBot: Duplicate item id %u attempted to be put into a working item set from operation %s, skipping", itemID, parentOperationName);
     }
     else
     {
@@ -2551,7 +2681,6 @@ const char* AuctionHouseBot::GetQualityName(ItemQualities quality)
         case ITEM_QUALITY_EPIC:       return "Epic";
         case ITEM_QUALITY_LEGENDARY:  return "Legendary";
         case ITEM_QUALITY_ARTIFACT:   return "Artifact";
-        case ITEM_QUALITY_HEIRLOOM:   return "Heirloom";
         default:                      return "Unknown";
     }
 }
@@ -2575,8 +2704,7 @@ const char* AuctionHouseBot::GetCategoryName(ItemClass category)
         case ITEM_CLASS_QUEST:        return "Quest";
         case ITEM_CLASS_KEY:          return "Key";
         case ITEM_CLASS_PERMANENT:    return "Permanent";
-        case ITEM_CLASS_MISC:         return "Misc";
-        case ITEM_CLASS_GLYPH:        return "Glyph";
+        case ITEM_CLASS_JUNK:         return "Misc";
         default:                      return "Unknown";
     }
 }
@@ -2584,28 +2712,30 @@ const char* AuctionHouseBot::GetCategoryName(ItemClass category)
 void AuctionHouseBot::PopulateVendorItemsPrices()
 {
     // Load vendor items' prices into a vector for fast lookup
-    QueryResult r = WorldDatabase.Query("SELECT MAX(entry) FROM item_template");
+    QueryResult* r = WorldDatabase.PQuery("SELECT MAX(entry) FROM item_template");
     if (!r)
     {
         vendorItemsPrices.clear();
         return;
     }
     Field* f = r->Fetch();
-    uint32_t maxItemID = f[0].Get<uint32>();
+    uint32 maxItemID = f[0].GetUInt32();
     // Size by max entry + 1 so the highest entry itself is a valid index
     vendorItemsPrices = std::vector<uint32>(maxItemID + 1, UINT32_MAX);
+    delete r;
 
-    QueryResult result = WorldDatabase.Query("SELECT v.entry, MIN(v.SellPrice) AS SellPrice FROM item_template v JOIN npc_vendor p ON v.entry = p.item WHERE v.class != {} GROUP BY v.entry", ITEM_CLASS_TRADE_GOODS);
+    QueryResult* result = WorldDatabase.PQuery("SELECT v.entry, MIN(v.sell_price) AS sell_price FROM item_template v JOIN npc_vendor p ON v.entry = p.item WHERE v.`class` != %u GROUP BY v.entry", ITEM_CLASS_TRADE_GOODS);
     if (result)
     {
         do
         {
             Field* pFields = result->Fetch();
-            uint32_t itemID = pFields[0].Get<uint32>();
-            uint32_t itemPrice = pFields[1].Get<uint32>();
+            uint32 itemID = pFields[0].GetUInt32();
+            uint32 itemPrice = pFields[1].GetUInt32();
             if (itemID < vendorItemsPrices.size())
                 vendorItemsPrices[itemID] = itemPrice;
         } while (result->NextRow());
+        delete result;
     }
 }
 
@@ -2619,24 +2749,26 @@ void AuctionHouseBot::CleanupExpiredAuctionItems()
     std::string queryItemInstancesString = R"SQL(
         SELECT guid
             FROM item_instance
-            LEFT JOIN auctionhouse ON auctionhouse.itemguid = item_instance.guid
-            WHERE item_instance.owner_guid IN ({})
-            AND auctionhouse.id IS NULL
+            LEFT JOIN auction ON auction.itemguid = item_instance.guid
+            WHERE item_instance.owner_guid IN (%s)
+            AND auction.id IS NULL
     )SQL";
 
-    QueryResult queryItemInstancesResult = CharacterDatabase.Query(queryItemInstancesString, AHCharactersGUIDsForQuery);
+    QueryResult* queryItemInstancesResult = CharacterDatabase.PQuery(queryItemInstancesString.c_str(), AHCharactersGUIDsForQuery.c_str());
     if (!queryItemInstancesResult)
         return;
 
-    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    CharacterDatabase.BeginTransaction();
 
     do
     {
-        uint32 guid = queryItemInstancesResult->Fetch()[0].Get<uint32>();
-        Item::DeleteFromDB(trans, guid);
+        uint32 guid = queryItemInstancesResult->Fetch()[0].GetUInt32();
+        CharacterDatabase.PExecute("DELETE FROM item_instance WHERE guid = '%u'", guid);
     } while (queryItemInstancesResult->NextRow());
 
-    CharacterDatabase.CommitTransaction(trans);
+    CharacterDatabase.CommitTransaction();
+
+    delete queryItemInstancesResult;
 }
 
 bool AuctionHouseBot::IsItemQuestReward(uint32 itemID)
@@ -2649,7 +2781,7 @@ bool AuctionHouseBot::IsItemCrafted(uint32 itemID)
     return (ItemIDsProducedByRecipes.find(itemID) != ItemIDsProducedByRecipes.end());
 }
 
-bool AuctionHouseBot::IsItemCategoryQualityInDBDropRatesConfig(ItemTemplate const* proto)
+bool AuctionHouseBot::IsItemCategoryQualityInDBDropRatesConfig(ItemPrototype const* proto)
 {
     if (!proto)
         return false;
@@ -2658,19 +2790,19 @@ bool AuctionHouseBot::IsItemCategoryQualityInDBDropRatesConfig(ItemTemplate cons
     {
         case ITEM_CLASS_WEAPON:
             return (AdvancedListingRuleUseDropRatesWeaponEnabled &&
-                    AdvancedListingRuleUseDropRatesWeaponAffectedQualities.contains(proto->Quality));
+                    AdvancedListingRuleUseDropRatesWeaponAffectedQualities.find(proto->Quality) != AdvancedListingRuleUseDropRatesWeaponAffectedQualities.end());
         case ITEM_CLASS_ARMOR:
             return (AdvancedListingRuleUseDropRatesArmorEnabled &&
-                    AdvancedListingRuleUseDropRatesArmorAffectedQualities.contains(proto->Quality));
+                    AdvancedListingRuleUseDropRatesArmorAffectedQualities.find(proto->Quality) != AdvancedListingRuleUseDropRatesArmorAffectedQualities.end());
         case ITEM_CLASS_RECIPE:
             return (AdvancedListingRuleUseDropRatesRecipeEnabled &&
-                    AdvancedListingRuleUseDropRatesRecipeAffectedQualities.contains(proto->Quality));
+                    AdvancedListingRuleUseDropRatesRecipeAffectedQualities.find(proto->Quality) != AdvancedListingRuleUseDropRatesRecipeAffectedQualities.end());
         default:
             return false;
     }
 }
 
-bool AuctionHouseBot::IsItemEligibleForDBDropRates(ItemTemplate const* proto)
+bool AuctionHouseBot::IsItemEligibleForDBDropRates(ItemPrototype const* proto)
 {
     if (!proto || !AdvancedListingRuleUseDropRatesEnabled)
         return false;
@@ -2678,6 +2810,7 @@ bool AuctionHouseBot::IsItemEligibleForDBDropRates(ItemTemplate const* proto)
     // Only continue if the itemID isn't an exception
     if (AdvancedListingRuleUseDropRatesExceptionItems.find(proto->ItemId) != AdvancedListingRuleUseDropRatesExceptionItems.end())
         return false;
+
 
     // If feature enabled, && item category/quality enabled
     //   && is not crafted, && is not a quest reward

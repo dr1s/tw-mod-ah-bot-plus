@@ -1,35 +1,81 @@
 /*
  * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license: https://github.com/azerothcore/azerothcore-wotlk/blob/master/LICENSE-AGPL3
-*/
+ */
 
 #include "Chat.h"
-#include "ScriptMgr.h"
+#include "ScriptObjects.h"
 #include "AuctionHouseBot.h"
 #include "Log.h"
-#include "Mail.h"
-#include "Player.h"
-#include "WorldSession.h"
+#include "Config/Config.h"
+
+#include <vector>
 
 class AHBot_WorldScript : public WorldScript
 {
 private:
     bool HasPerformedStartup;
+    bool ConfigurationLoaded;
+    int32 UpdateTimer;
 
 public:
-    AHBot_WorldScript() : WorldScript("AHBot_WorldScript"), HasPerformedStartup(false) { }
+    AHBot_WorldScript() : WorldScript("AHBot_WorldScript", { WORLDHOOK_ON_AFTER_CONFIG_LOAD, WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED, WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_UPDATE }), HasPerformedStartup(false), ConfigurationLoaded(false), UpdateTimer(0) { }
 
     void OnAfterConfigLoad(bool /*reload*/) override
+    {
+        // On initial startup, module scripts are not yet loaded when this hook fires,
+        // so initial configuration is handled in OnBeforeWorldInitialized.
+        // This hook is still used for config reloads after the server is running.
+        LoadConfiguration(false);
+    }
+
+    void OnBeforeWorldInitialized() override
+    {
+        LoadConfiguration(true);
+    }
+
+
+    void OnStartup() override
+    {
+        if (!auctionbot->IsModuleEnabled())
+            return;
+
+        if (!ConfigurationLoaded)
+            LoadConfiguration(true);
+
+        sLog.outString("AuctionHouseBot: Running initial auction house update ...");
+        auctionbot->Update();
+        HasPerformedStartup = true;
+        UpdateTimer = 60000; // Next automatic update in 1 minute
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        if (!auctionbot->IsModuleEnabled())
+            return;
+
+        UpdateTimer -= static_cast<int32>(diff);
+        if (UpdateTimer <= 0)
+        {
+            auctionbot->Update();
+            UpdateTimer = 60000; // 1 minute
+        }
+    }
+
+private:
+    void LoadConfiguration(bool startup)
     {
         if (!auctionbot->IsModuleEnabled())
             return;
 
         auctionbot->InitializeConfiguration();
-        if (HasPerformedStartup == true)
+        ConfigurationLoaded = true;
+
+        if (startup || HasPerformedStartup)
         {
-            LOG_INFO("server.loading", "AuctionHouseBot: (Re)populating item candidate lists ...");
+            sLog.outString("AuctionHouseBot: (Re)populating item candidate lists ...");
             auctionbot->PopulateItemCandidatesAndProportions();
 
-            if (sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false))
+            if (GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false))
             {
                 auctionbot->PopulateQuestRewardItemIDs();
                 auctionbot->PopulateItemDropChances();
@@ -37,138 +83,10 @@ public:
         }
     }
 
-    void OnStartup() override
+    static bool GetConfigBool(char const* name, bool def)
     {
-        if (!auctionbot->IsModuleEnabled())
-            return;
-
-        LOG_INFO("server.loading", "AuctionHouseBot: (Re)populating item candidate lists ...");
-        auctionbot->PopulateItemCandidatesAndProportions();
-        if (sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false))
-        {
-            auctionbot->PopulateQuestRewardItemIDs();
-            auctionbot->PopulateItemDropChances();
-        }
-        HasPerformedStartup = true;
-    }
-};
-
-class AHBot_AuctionHouseScript : public AuctionHouseScript
-{
-public:
-    AHBot_AuctionHouseScript() : AuctionHouseScript("AHBot_AuctionHouseScript") { }
-
-    void OnBeforeAuctionHouseMgrSendAuctionSuccessfulMail(AuctionHouseMgr* /*auctionHouseMgr*/, AuctionEntry* /*auction*/, Player* owner, uint32& /*owner_accId*/, uint32& /*profit*/, bool& sendNotification, bool& updateAchievementCriteria, bool& /*sendMail*/) override
-    {
-        if (owner)
-        {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == owner->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
-            if (isAHBot == true)
-            {
-                sendNotification = false;
-                updateAchievementCriteria = false;
-            }
-        }
-    }
-
-    void OnBeforeAuctionHouseMgrSendAuctionExpiredMail(AuctionHouseMgr* /*auctionHouseMgr*/, AuctionEntry* /*auction*/, Player* owner, uint32& /*owner_accId*/, bool& sendNotification, bool& sendMail) override
-    {
-        if (owner)
-        {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == owner->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
-            if (isAHBot == true)
-            {
-                sendNotification = false;
-
-                if (sConfigMgr->GetOption<bool>("AuctionHouseBot.ReturnExpiredAuctionItemsToBot", false))
-                    sendMail = true;
-                else
-                    sendMail = false;
-            }
-        }   
-    }
-
-    void OnBeforeAuctionHouseMgrSendAuctionOutbiddedMail(AuctionHouseMgr* /*auctionHouseMgr*/, AuctionEntry* auction, Player* oldBidder, uint32& /*oldBidder_accId*/, Player* newBidder, uint32& newPrice, bool& /*sendNotification*/, bool& /*sendMail*/) override
-    {
-        if (oldBidder && !newBidder)
-            oldBidder->GetSession()->SendAuctionBidderNotification((uint32)auction->GetHouseId(), auction->Id, ObjectGuid::Create<HighGuid::Player>(auctionbot->CurrentBotCharGUID), newPrice, auction->GetAuctionOutBid(), auction->item_template);
-    }
-
-    void OnBeforeAuctionHouseMgrSendAuctionWonMail(AuctionHouseMgr* /*auctionHouseMgr*/, AuctionEntry* /*auction*/, Player* bidder, uint32& /*bidder_accId*/, bool& sendNotification, bool& updateAchievementCriteria, bool& /*sendMail*/) override
-    {
-        // The bot buyer is a shell Player that never went through a full load (no map, no achievement data),
-        // so suppress the paths that would touch that missing state when it wins an auction
-        if (bidder)
-        {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == bidder->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
-            if (isAHBot == true)
-            {
-                sendNotification = false;
-                updateAchievementCriteria = false;
-            }
-        }
-    }
-
-    void OnBeforeAuctionHouseMgrUpdate() override
-    {
-        auctionbot->Update();
-    }
-};
-
-class AHBot_MailScript : public MailScript
-{
-public:
-    AHBot_MailScript() : MailScript("AHBot_MailScript") { }
-
-    void OnBeforeMailDraftSendMailTo(MailDraft* /*mailDraft*/, MailReceiver const& receiver, MailSender const& sender, MailCheckMask& /*checked*/, uint32& /*deliver_delay*/, uint32& /*custom_expiration*/, bool& deleteMailItemsFromDB, bool& sendMail) override
-    {
-        bool isAHBot = false;
-        for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-        {
-            if (character.CharacterGUID == receiver.GetPlayerGUIDLow())
-            {
-                isAHBot = true;
-                break;
-            }
-        }
-        if (isAHBot == true)
-        {
-            if (sConfigMgr->GetOption<bool>("AuctionHouseBot.ReturnExpiredAuctionItemsToBot", false))
-            {
-                deleteMailItemsFromDB = false;
-                sendMail = true;
-            }
-            else
-            {
-                if (sender.GetMailMessageType() == MAIL_AUCTION)        // auction mail with items
-                    deleteMailItemsFromDB = true;
-                sendMail = false;
-            }
-        }
+        std::string val = sConfig.GetStringDefaultInSection(name, "mod-ah-bot-plus", def ? "true" : "false");
+        return val == "true" || val == "TRUE" || val == "yes" || val == "YES" || val == "1";
     }
 };
 
@@ -177,65 +95,64 @@ class AHBot_CommandScript : public CommandScript
 public:
     AHBot_CommandScript() : CommandScript("AHBot_CommandScript") { }
 
-    Acore::ChatCommands::ChatCommandTable GetCommands() const override
+    std::vector<ChatCommand> GetCommands() const override
     {
-        static Acore::ChatCommands::ChatCommandTable AHBotCommandTable = {
-            {"update", HandleAHBotUpdateCommand, SEC_GAMEMASTER, Acore::ChatCommands::Console::Yes},
-            {"reload", HandleAHBotReloadCommand, SEC_GAMEMASTER, Acore::ChatCommands::Console::Yes},
-            {"empty",  HandleAHBotEmptyCommand,  SEC_GAMEMASTER, Acore::ChatCommands::Console::Yes},
-            {"help",  HandleAHBotHelpCommand,  SEC_GAMEMASTER, Acore::ChatCommands::Console::Yes}
+        static std::vector<ChatCommand> AHBotCommandTable = {
+            { "update", SEC_DEVELOPER, true, nullptr, "", nullptr, 0, "", 0, HandleAHBotUpdateCommand },
+            { "reload", SEC_DEVELOPER, true, nullptr, "", nullptr, 0, "", 0, HandleAHBotReloadCommand },
+            { "empty",  SEC_DEVELOPER, true, nullptr, "", nullptr, 0, "", 0, HandleAHBotEmptyCommand },
+            { "help",   SEC_DEVELOPER, true, nullptr, "", nullptr, 0, "", 0, HandleAHBotHelpCommand }
         };
 
-        static Acore::ChatCommands::ChatCommandTable commandTable = {
-            {"ahbot", AHBotCommandTable},
+        static std::vector<ChatCommand> commandTable = {
+            { "ahbot", SEC_DEVELOPER, true, nullptr, "", AHBotCommandTable.data(), 0, "", 0, nullptr },
         };
 
         return commandTable;
     }
 
-    static bool HandleAHBotUpdateCommand(ChatHandler* handler, const char* /*args*/)
+    static bool HandleAHBotUpdateCommand(ChatHandler* handler, char* /*args*/)
     {
-        LOG_INFO("module", "AuctionHouseBot: Updating Auction House...");
+        sLog.outString("AuctionHouseBot: Updating Auction House...");
         handler->PSendSysMessage("AuctionHouseBot: Updating Auction House...");
         AuctionHouseBot::instance()->Update();
-        LOG_INFO("module", "AuctionHouseBot: Auction House Updated.");
+        sLog.outString("AuctionHouseBot: Auction House Updated.");
         handler->PSendSysMessage("AuctionHouseBot: Auction House Updated.");
         return true;
     }
 
-    static bool HandleAHBotReloadCommand(ChatHandler* handler, char const* /*args*/)
+    static bool HandleAHBotReloadCommand(ChatHandler* handler, char* /*args*/)
     {
-        LOG_INFO("module", "AuctionHouseBot: Reloading Config...");
+        sLog.outString("AuctionHouseBot: Reloading Config...");
         handler->PSendSysMessage("AuctionHouseBot: Reloading Config...");
 
-        // Reload config file with isReload = true
-        sConfigMgr->LoadModulesConfigs(true, false);
         AuctionHouseBot::instance()->InitializeConfiguration();
         AuctionHouseBot::instance()->PopulateItemCandidatesAndProportions();
 
-        if (sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", true))
+        if (GetConfigBool("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", true))
         {
             auctionbot->PopulateQuestRewardItemIDs();
             auctionbot->PopulateItemDropChances();
         }
 
-        LOG_INFO("module", "AuctionHouseBot: Config reloaded.");
-        handler->PSendSysMessage("AuctionHouseBot: Config reloaded.");        
+        sLog.outString("AuctionHouseBot: Config reloaded.");
+        handler->PSendSysMessage("AuctionHouseBot: Config reloaded.");
         return true;
     }
 
-    static bool HandleAHBotEmptyCommand(ChatHandler* handler, char const* /*args*/)
+    static bool HandleAHBotEmptyCommand(ChatHandler* handler, char* /*args*/)
     {
-        LOG_INFO("module", "AuctionHouseBot: Emptying Auction House...");
+        sLog.outString("AuctionHouseBot: Emptying Auction House...");
         handler->PSendSysMessage("AuctionHouseBot: Emptying Auction House...");
         AuctionHouseBot::instance()->EmptyAuctionHouses();
-        AuctionHouseBot::instance()->CleanupExpiredAuctionItems(); // Must go after EmptyAuctionHouses()
-        LOG_INFO("module", "AuctionHouseBot: Auction Houses Emptied.");
+        AuctionHouseBot::instance()->CleanupExpiredAuctionItems();
+        AuctionHouseBot::instance()->CleanupBotMail();
+        sLog.outString("AuctionHouseBot: Auction Houses Emptied.");
         handler->PSendSysMessage("AuctionHouseBot: Auction Houses Emptied.");
         return true;
     }
 
-    static bool HandleAHBotHelpCommand(ChatHandler* handler, char const* /*args*/)
+    static bool HandleAHBotHelpCommand(ChatHandler* handler, char* /*args*/)
     {
         handler->PSendSysMessage("AuctionHouseBot commands:");
         handler->PSendSysMessage("  .ahbot reload - Reloads configuration");
@@ -243,12 +160,17 @@ public:
         handler->PSendSysMessage("  .ahbot update - Runs an update cycle");
         return true;
     }
+
+private:
+    static bool GetConfigBool(char const* name, bool def)
+    {
+        std::string val = sConfig.GetStringDefaultInSection(name, "mod-ah-bot-plus", def ? "true" : "false");
+        return val == "true" || val == "TRUE" || val == "yes" || val == "YES" || val == "1";
+    }
 };
 
 void AddAHBotScripts()
 {
     new AHBot_WorldScript();
-    new AHBot_AuctionHouseScript();
-    new AHBot_MailScript();
     new AHBot_CommandScript();
 }
