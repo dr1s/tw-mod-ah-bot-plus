@@ -33,6 +33,7 @@ This port removes content that does not exist in Vanilla WoW:
 - **Jewelcrafting** and **Inscription** removed from the recipe-produced-item skill list.
 - **Artifact** quality and **Gem** item class are kept, because they exist in Vanilla/Tortoise.
 - Default item-ID lists were validated against the live `item_template` database and pruned of non-Vanilla / missing entries.
+- **Advanced pricing** now falls back to item-name heuristics when the item's subclass is the generic Vanilla value (e.g. `Linen Cloth`, `Thorium Bar`, `Black Lotus`, `Major Healing Potion`, `Essence of Fire`). This makes the subclass-based curves useful on Tortoise data.
 
 The module uses Tortoise's `ITEM_CLASS_JUNK` enum internally, but exposes it as the **Misc** auction-house category in config keys to match the in-game naming.
 
@@ -51,7 +52,7 @@ Notes:
 
 ## In-Game Commands
 
-The module adds the following GM-only commands:
+The module adds the following GM-only commands (requires GM level 3 / `SEC_DEVELOPER` or higher):
 
 | Command | Description |
 |----------|--------------|

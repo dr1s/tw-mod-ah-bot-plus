@@ -38,7 +38,9 @@
 #include <algorithm>
 #include <functional>
 #include <set>
+#include <initializer_list>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -483,6 +485,23 @@ void AuctionHouseBot::CalculateItemValue(ItemPrototype const* itemProto, uint64&
         outBuyoutPrice = 1;
 }
 
+// Vanilla/Tortoise item data does not use the later-expansion subclasses that the
+// original advanced-pricing code expects (e.g. ITEM_SUBCLASS_CLOTH, HERB, POTION).
+// Most trade goods and consumables are subclass 0, so we fall back to item-name
+// matching when the subclass-specific branches did not apply.
+static bool ItemNameContains(ItemPrototype const* itemProto, const char* substring)
+{
+    return std::string(itemProto->Name1).find(substring) != std::string::npos;
+}
+
+static bool ItemNameContainsAny(ItemPrototype const* itemProto, std::initializer_list<const char*> substrings)
+{
+    for (const char* substring : substrings)
+        if (ItemNameContains(itemProto, substring))
+            return true;
+    return false;
+}
+
 float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemPrototype const* itemProto)
 {
     /* "ADVANCED" SUBCLASS PRICE MULTIPLIER FORMULA NOTES
@@ -507,7 +526,9 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemPrototype const* itemPro
       - The subtraction of 'r' can help ensure low-level items don't get inflated excessively. Sometimes it isn't necessary
     */
 
-    // Try to approximate real world prices for Trade Goods based on subclass and item level
+    // Try to approximate real world prices based on subclass and item level.
+    // advancedPricingMultiplier stays at 1.0 until a matching curve is found; that fact
+    // is used below to decide whether to try the Vanilla name-based fallback.
     double advancedPricingMultiplier = 1.0f;
     if (itemProto->Class == ITEM_CLASS_CONSUMABLE)
     {
@@ -533,12 +554,38 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemPrototype const* itemPro
             {
                 if (!AdvancedPricingConsumableFlaskEnabled)
                     break;
+                // ITEM_SUBCLASS_FLASK is 3, but some vanilla databases also place
+                // potions/elixirs at subclass 3. Require "Flask" in the name so the
+                // extreme price-by-vendor-sell formula doesn't hit the wrong items.
+                if (!ItemNameContains(itemProto, "Flask"))
+                    break;
                 // Use logarithmic scaling to compress large differences in vendorSellPrice to a range of ~22g-25g
                 // advPricingMultiplier = LowTargetRange + (UpperTargetRange - LowTargetRange) * ( ln(vendorSellPrice) - ln(minVendorPrice) ) / ( ln(maxVendorPrice) - ln(minVendorPrice) ) / vendorSellPrice
                 advancedPricingMultiplier = (220000 + (250000-220000) * (std::log(itemProto->SellPrice) - std::log(1250)) / (std::log(10000) - std::log(1250))) / itemProto->SellPrice;
             }
             default:
                 break;
+        }
+
+        // Vanilla data frequently marks potions/elixirs/flasks as generic subclass 0.
+        // Only run this fallback if no subclass-specific curve was applied above
+        // and the item is actually in the generic consumable subclass.
+        if (advancedPricingMultiplier == 1.0f && itemProto->SubClass == ITEM_SUBCLASS_CONSUMABLE)
+        {
+            if (AdvancedPricingConsumablePotionEnabled && ItemNameContains(itemProto, "Potion"))
+            {
+                double potionMultiplierHelper = std::log(1.0 + (0.08 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(potionMultiplierHelper,3.0)) / (1 + (4.0 * potionMultiplierHelper))) + (std::pow(potionMultiplierHelper,2.5));
+            }
+            else if (AdvancedPricingConsumableElixirEnabled && ItemNameContains(itemProto, "Elixir"))
+            {
+                double elixirMultiplierHelper = std::log(1.0 + (1.6 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(elixirMultiplierHelper,3.1)) / (1 + (5.0 * elixirMultiplierHelper))) + (0.05 * std::pow(elixirMultiplierHelper,3.2)) - 1.0;
+            }
+            else if (AdvancedPricingConsumableFlaskEnabled && ItemNameContains(itemProto, "Flask"))
+            {
+                advancedPricingMultiplier = (220000 + (250000-220000) * (std::log(itemProto->SellPrice) - std::log(1250)) / (std::log(10000) - std::log(1250))) / itemProto->SellPrice;
+            }
         }
     }
     else if (itemProto->Class == ITEM_CLASS_GEM && AdvancedPricingGemEnabled)
@@ -608,6 +655,59 @@ float AuctionHouseBot::GetAdvancedPricingMultiplier(ItemPrototype const* itemPro
             }
             default:
                 break;
+        }
+
+        // Vanilla data packs most trade goods into subclass 0, so classify by name
+        // when the subclass-specific branches above did not match. The order matters:
+        // an item name may match multiple tokens (e.g. "Elemental" vs "Essence"),
+        // so the most specific/important categories are checked first.
+        if (advancedPricingMultiplier == 1.0f && itemProto->SubClass == ITEM_SUBCLASS_TRADE_GOODS)
+        {
+            if (AdvancedPricingTradeGoodClothEnabled && ItemNameContains(itemProto, "Cloth"))
+            {
+                double clothMultiplierHelper = std::log(1.0 + (itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(clothMultiplierHelper,2.0)) / (1 + (0.8 * clothMultiplierHelper))) + (0.001 * std::pow(clothMultiplierHelper,3.5)) - 0.3;
+            }
+            else if (AdvancedPricingTradeGoodLeatherEnabled && ItemNameContainsAny(itemProto, {"Leather", "Hide"}))
+            {
+                double leatherMultiplierHelper = std::log(1.0 + (0.25 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(leatherMultiplierHelper,0.15)) / (1 + (2.0 * leatherMultiplierHelper))) + (0.4 * std::pow(leatherMultiplierHelper,3.0)) - 0.2;
+            }
+            else if (AdvancedPricingTradeGoodMetalStoneEnabled && ItemNameContainsAny(itemProto, {"Ore", "Bar", "Stone"}))
+            {
+                double metalMultiplierHelper = std::log(1.0 + (75.0 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(metalMultiplierHelper,3.0)) / (1 + (7.0 * metalMultiplierHelper))) + (0.001 * std::pow(metalMultiplierHelper,3.5)) - 5.2;
+            }
+            else if (AdvancedPricingTradeGoodEnchantingEnabled && ItemNameContainsAny(itemProto, {"Dust", "Essence", "Shard", "Crystal"}))
+            {
+                double enchantingMultiplierHelper = std::log(1.0 + (0.25 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(enchantingMultiplierHelper,0.15)) / (1 + (2.0 * enchantingMultiplierHelper))) + (0.4 * std::pow(enchantingMultiplierHelper,3.0)) - 0.2;
+            }
+            else if (AdvancedPricingTradeGoodElementalEnabled && ItemNameContains(itemProto, "Elemental"))
+            {
+                advancedPricingMultiplier = 85 - (itemProto->ItemLevel / 0.97);
+            }
+            else if (AdvancedPricingTradeGoodHerbEnabled && ItemNameContainsAny(itemProto, {"bloom", "leaf", "root", "thorn", "weed", "grass", "lotus", "cap", "moss", "kelp", "tears", "foil", "mushroom", "whisker", "sage", "sansam", "petal"}))
+            {
+                double herbMultiplierHelper = std::log(1.0 + (5.0 * itemProto->ItemLevel));
+                advancedPricingMultiplier = (std::pow(herbMultiplierHelper,3.0) / (1 + (1.8 * herbMultiplierHelper))) - 4.2;
+            }
+            else if (AdvancedPricingTradeGoodMeatEnabled && ItemNameContainsAny(itemProto, {"Meat", "Flesh", "Chunk", "Egg", "Fish"}))
+            {
+                double meatMultiplierHelper = std::log(1.0 + (0.5 * itemProto->ItemLevel));
+                advancedPricingMultiplier = ((std::pow(meatMultiplierHelper,3.2)) / (1 + (2.0 * meatMultiplierHelper))) + (0.05 * std::pow(meatMultiplierHelper,3.2)) - 0.1;
+            }
+        }
+    }
+    else if (itemProto->Class == ITEM_CLASS_REAGENT)
+    {
+        // Vanilla elemental reagents (e.g. Essence of Fire) live in ITEM_CLASS_REAGENT
+        // instead of ITEM_CLASS_TRADE_GOODS subclass 10. Enchanting essences are in
+        // ITEM_CLASS_TRADE_GOODS, so the class check keeps them separate.
+        if (AdvancedPricingTradeGoodElementalEnabled &&
+            ItemNameContainsAny(itemProto, {"Elemental", "Essence", "Core", "Globe", "Heart", "Ichor"}))
+        {
+            advancedPricingMultiplier = 85 - (itemProto->ItemLevel / 0.97);
         }
     }
     else if (itemProto->Class == ITEM_CLASS_JUNK)
